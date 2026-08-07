@@ -13,6 +13,8 @@ class Settings:
     EXECUTION_TIMEOUT: int = int(os.getenv("EXECUTION_TIMEOUT", "15"))
     WORKSPACE_DIR: str = os.getenv("WORKSPACE_DIR", "workspace")
     MAX_AGENT_ITERATIONS: int = int(os.getenv("MAX_AGENT_ITERATIONS", "10"))
+    EXECUTOR_URL: str = os.getenv("EXECUTOR_URL", "http://localhost:8000")
+    DATA_DIR: str = os.getenv("DATA_DIR", "data")
 
 
 settings = Settings()

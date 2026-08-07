@@ -1,7 +1,9 @@
 """
-Error tracking utility.
-Maintains a JSON-based log of execution errors, enforces the
-"3 strikes" rule, and clears resolved errors.
+Error tracking utility, scoped per project.
+Each project gets its own data/<project>/errors.json, created on first
+failure. Enforces the "3 strikes" rule automatically, from inside the
+execution tools themselves - not dependent on the model calling a
+separate logging tool.
 """
 
 import json
@@ -15,12 +17,31 @@ from src.config import settings
 
 class ErrorTracker:
     MAX_RETRIES = 3
+    MAX_TOTAL_ATTEMPTS = 6  # hard cap, independent of whether errors repeat
 
-    def __init__(self, error_file: str = None):
-        self.error_file = Path(error_file or settings.ERROR_LOG_PATH)
-        self.error_file.parent.mkdir(parents=True, exist_ok=True)
-        if not self.error_file.exists():
-            self._write({})
+    def _meta_key(self):
+        return "_meta"
+
+    def record_attempt(self) -> dict:
+        """
+        Increments a hard, unconditional attempt counter for this project -
+        independent of whether individual errors repeat. This is the real
+        backstop: even if the model tries a different broken approach every
+        time (so no single error hash ever hits 3), total attempts still
+        gets capped.
+        """
+        data = self._read()
+        meta = data.get(self._meta_key(), {"total_attempts": 0})
+        meta["total_attempts"] += 1
+        data[self._meta_key()] = meta
+        self._write(data)
+        return {
+            "total_attempts": meta["total_attempts"],
+            "global_limit_reached": meta["total_attempts"] > self.MAX_TOTAL_ATTEMPTS,
+        }
+
+    def clear_all(self) -> None:
+        self._write({})
 
     def _read(self) -> Dict[str, Any]:
         try:
@@ -57,23 +78,26 @@ class ErrorTracker:
 
         self._write(data)
         count = data[error_id]["count"]
-
         return {
             "error_id": error_id,
             "count": count,
             "max_retries_reached": count >= self.MAX_RETRIES,
         }
 
-    def clear_error(self, error_message: str) -> bool:
-        data = self._read()
-        error_id = self._hash_error(error_message)
-        if error_id in data:
-            del data[error_id]
-            self._write(data)
-            return True
-        return False
+    @staticmethod
+    def _normalize_error(error_message: str) -> str:
+        """
+        Extract a stable signature from a traceback - the final
+        'ExceptionType: message' line - rather than the full text, so
+        the same root-cause error across slightly different code attempts
+        still counts as the same error for the retry cap.
+        """
+        lines = [l for l in error_message.strip().splitlines() if l.strip()]
+        if not lines:
+            return error_message.strip().lower()
+        return lines[-1].strip().lower()
 
-    def get_count(self, error_message: str) -> int:
-        data = self._read()
-        error_id = self._hash_error(error_message)
-        return data.get(error_id, {}).get("count", 0)
+    @staticmethod
+    def _hash_error(error_message: str) -> str:
+        normalized = ErrorTracker._normalize_error(error_message)
+        return hashlib.sha256(normalized.encode()).hexdigest()[:16]

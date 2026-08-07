@@ -1,22 +1,23 @@
 """
-Entry point: accepts a natural language coding task either as a CLI
-argument (single-shot) or via an interactive loop, and runs the
+Entry point: accepts a natural language coding task, plus an optional
+project name to namespace generated files under, and runs the
 self-healing agent.
 """
 
-import sys
+import argparse
 
 from src.agent.core import build_agent
+from src.agent import tools as agent_tools
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
+def slugify(text: str) -> str:
+    return "-".join(text.lower().split())[:40]
+
+
 def extract_saved_files(messages) -> list[str]:
-    """
-    Walk the message history and collect every file path the agent
-    saved via write_code_to_file.
-    """
     saved = []
     for msg in messages:
         tool_calls = getattr(msg, "tool_calls", None)
@@ -30,35 +31,43 @@ def extract_saved_files(messages) -> list[str]:
     return saved
 
 
-def run(task: str):
+from langgraph.errors import GraphRecursionError
+
+def run(task: str, project: str):
+    agent_tools.set_current_project(project)
     agent = build_agent()
 
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": task}]},
-        config={"recursion_limit": 50},
-    )
-
-    messages = result["messages"]
-    final_message = messages[-1]
-    saved_files = extract_saved_files(messages)
-
-    print("\n" + "=" * 60)
-    print("CODESENTINEL RESULT")
-    print("=" * 60)
-
-    if saved_files:
-        print("\nFiles saved to ./workspace:")
-        for f in saved_files:
-            print(f"  - {f}")
-        print()
-
-    print(final_message.content)
+    try:
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": task}]},
+            config={"recursion_limit": 25},
+        )
+    except GraphRecursionError:
+        print("\n" + "=" * 60)
+        print(f"CODESENTINEL RESULT — project: {project}")
+        print("=" * 60)
+        print(
+            "The agent exceeded its step budget without reaching a stable "
+            "result. This usually means it kept trying different broken "
+            "approaches without converging — check the task's clarity, or "
+            "review data/<project>/errors.json for what it attempted."
+        )
+        return
 
 
 def main():
-    if len(sys.argv) > 1:
-        task = " ".join(sys.argv[1:])
-        run(task)
+    parser = argparse.ArgumentParser(description="CodeSentinel coding agent")
+    parser.add_argument("task", nargs="?", help="Natural language coding task")
+    parser.add_argument(
+        "-p", "--project",
+        help="Project name to namespace generated files under. "
+             "Auto-generated from the task if omitted.",
+    )
+    args = parser.parse_args()
+
+    if args.task:
+        project = args.project or slugify(args.task)
+        run(args.task, project)
         return
 
     print("CodeSentinel — Self-Healing Coding Agent")
@@ -70,7 +79,9 @@ def main():
             break
         if not task:
             continue
-        run(task)
+        project_input = input("Project name (blank = auto) > ").strip()
+        project = project_input or slugify(task)
+        run(task, project)
 
 
 if __name__ == "__main__":

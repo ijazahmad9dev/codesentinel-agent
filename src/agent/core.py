@@ -1,15 +1,11 @@
-"""
-Agent construction using LangChain's `create_agent`.
-"""
-
 from langchain.agents import create_agent
 from langchain_ollama import ChatOllama
 
 from src.agent.tools import (
-    execute_python_code,
+    execute_code,
+    execute_project_command,
     write_code_to_file,
-    log_execution_error,
-    clear_execution_error,
+    list_workspace_projects,
 )
 from src.agent.prompts import SYSTEM_PROMPT
 from src.config import settings
@@ -23,15 +19,10 @@ def build_agent():
     )
 
     tools = [
-        execute_python_code,
+        execute_code,
+        execute_project_command,
         write_code_to_file,
-        log_execution_error,
-        clear_execution_error,
+        list_workspace_projects,
     ]
 
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-    )
-    return agent
+    return create_agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)

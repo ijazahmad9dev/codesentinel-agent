@@ -7,46 +7,116 @@ from langchain_core.tools import tool
 from src.executor.sandbox import CodeSandbox
 from src.utils.error_tracker import ErrorTracker
 from src.utils.file_manager import FileManager
+from src.utils.code_safety import check_code_safety, SafetyViolation
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 sandbox = CodeSandbox()
-tracker = ErrorTracker()
 file_manager = FileManager()
+
+_current_project = "default"
+
+
+def set_current_project(project_slug: str) -> None:
+    global _current_project
+    _current_project = project_slug
+
+
+def _tracker() -> ErrorTracker:
+    # Instantiated per-call so each project gets its own errors.json,
+    # created lazily on first failure during execution.
+    return ErrorTracker(_current_project)
 
 
 @tool
-def execute_python_code(code: str) -> str:
-    """
-    Execute the given Python code in an isolated sandbox and return the result.
-    Use this to test or verify code before saving it permanently.
-    """
-    logger.info("Executing generated code.")
-    result = sandbox.run(code)
+def execute_code(code: str, language: str = "python") -> str:
+    """..."""
+    tracker = _tracker()
+    attempt = tracker.record_attempt()
+    if attempt["global_limit_reached"]:
+        return (
+            f"GLOBAL_ATTEMPT_LIMIT_REACHED: This project has made "
+            f"{attempt['total_attempts']} execution attempts without "
+            f"succeeding. STOP immediately - do not call execute_code or "
+            f"execute_project_command again. Report this failure to the user."
+        )
+
+    if language == "python":
+        try:
+            check_code_safety(code)
+        except SafetyViolation as e:
+            logger.warning(f"Refused unsafe code: {e.reason}")
+            return f"REFUSED: {e.reason} This task is outside the sandbox's allowed scope."
+
+    logger.info(f"Executing {language} snippet in sandbox.")
+    result = sandbox.run(code, language=language)
 
     if result.success:
+        tracker.clear_all()
         return f"EXECUTION_SUCCESS\nSTDOUT:\n{result.stdout}"
 
+    log_result = tracker.log_error(result.stderr or "unknown error")
+    if log_result["max_retries_reached"]:
+        return (
+            f"EXECUTION_FAILED (attempt {log_result['count']}/3)\n"
+            f"STDERR:\n{result.stderr}\n\n"
+            f"MAX_RETRIES_REACHED: This exact error has occurred "
+            f"{log_result['count']} times. STOP retrying and report this "
+            f"failure to the user."
+        )
+
     return (
-        f"EXECUTION_FAILED\n"
+        f"EXECUTION_FAILED (attempt {log_result['count']}/3)\n"
         f"RETURN_CODE: {result.returncode}\n"
         f"STDERR:\n{result.stderr}"
     )
 
+@tool
+def execute_project_command(command: str, language: str = "python") -> str:
+    """
+    Run a shell command against the full set of files already saved for
+    the current project via write_code_to_file (e.g. "npm install && npm
+    run build", "pip install -r requirements.txt && python3 main.py").
+    """
+    project_path = file_manager.workspace_dir / _current_project
+    if not project_path.exists():
+        return (
+            f"EXECUTION_FAILED\nSTDERR:\nNo files found for project "
+            f"'{_current_project}'. Save files with write_code_to_file first."
+        )
+
+    logger.info(f"Running project command for '{_current_project}': {command}")
+    result = sandbox.run_project(project_path, language=language, command=command)
+    tracker = _tracker()
+
+    if result.success:
+        tracker.clear_all()
+        return f"EXECUTION_SUCCESS\nSTDOUT:\n{result.stdout}"
+
+    log_result = tracker.log_error(result.stderr or "unknown error")
+    if log_result["max_retries_reached"]:
+        return (
+            f"EXECUTION_FAILED (attempt {log_result['count']}/3)\n"
+            f"STDERR:\n{result.stderr}\n\n"
+            f"MAX_RETRIES_REACHED: This exact error has occurred "
+            f"{log_result['count']} times for this project. STOP retrying "
+            f"and report this failure to the user."
+        )
+
+    return (
+        f"EXECUTION_FAILED (attempt {log_result['count']}/3)\n"
+        f"RETURN_CODE: {result.returncode}\n"
+        f"STDERR:\n{result.stderr}"
+    )
 
 @tool
 def write_code_to_file(file_path: str, code: str) -> str:
-    """
-    Save code to a real file inside the project workspace.
-    Use this ONLY after the code has been verified working via
-    execute_python_code. Use a meaningful relative path and filename,
-    e.g. "reverse_string.py", or for multi-file projects like a FastAPI
-    backend: "app/main.py", "app/models.py", "app/routers/users.py".
-    Call this once per file for multi-file projects.
-    """
+    """..."""
+    logger.info(f"write_code_to_file called: {file_path}")
+    namespaced_path = f"{_current_project}/{file_path}"
     try:
-        saved_path = file_manager.write_file(file_path, code)
+        saved_path = file_manager.write_file(namespaced_path, code)
         logger.info(f"Saved file: {saved_path}")
         return f"FILE_SAVED: {saved_path}"
     except ValueError as e:
@@ -54,32 +124,10 @@ def write_code_to_file(file_path: str, code: str) -> str:
 
 
 @tool
-def log_execution_error(error_message: str, traceback: str = "") -> str:
-    """
-    Log an execution error to the persistent JSON error store.
-    Call this whenever execute_python_code returns EXECUTION_FAILED.
-    Returns the occurrence count for this exact error and whether the
-    3-attempt retry limit has been reached.
-    """
-    result = tracker.log_error(error_message, traceback)
-    logger.warning(f"Error logged: {result}")
-
-    if result["max_retries_reached"]:
-        return (
-            f"MAX_RETRIES_REACHED. This exact error has occurred "
-            f"{result['count']} times. STOP fixing and report this to the user."
-        )
-    return f"ERROR_LOGGED. Occurrence count: {result['count']} / 3."
-
-
-@tool
-def clear_execution_error(error_message: str) -> str:
-    """
-    Remove an error from the persistent JSON error store once it has been
-    successfully resolved (i.e. execute_python_code returned EXECUTION_SUCCESS
-    after a fix for a previously logged error).
-    """
-    removed = tracker.clear_error(error_message)
-    if removed:
-        return "ERROR_CLEARED from log."
-    return "No matching error found in log."
+def list_workspace_projects() -> str:
+    """..."""
+    logger.info("list_workspace_projects called")
+    projects = file_manager.list_projects()
+    if not projects:
+        return "No existing projects in workspace."
+    return "Existing projects:\n" + "\n".join(f"- {p}" for p in projects)

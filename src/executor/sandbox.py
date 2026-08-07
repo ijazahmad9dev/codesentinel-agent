@@ -1,15 +1,14 @@
 """
-Code execution sandbox.
-Executes Python code in an isolated subprocess with a timeout,
-running inside the workspace directory so it can import already-saved
-project files (e.g. testing main.py against models.py).
+Client for the CodeSentinel Executor service.
 """
 
-import subprocess
-import sys
-import tempfile
-import os
+import base64
+import io
+import tarfile
 from dataclasses import dataclass
+from pathlib import Path
+
+import requests
 
 from src.config import settings
 
@@ -23,42 +22,50 @@ class ExecutionResult:
 
 
 class CodeSandbox:
-    def __init__(self, timeout: int = None, workspace_dir: str = None):
+    def __init__(self, executor_url: str = None, timeout: int = None):
+        self.executor_url = executor_url or settings.EXECUTOR_URL
         self.timeout = timeout or settings.EXECUTION_TIMEOUT
-        self.workspace_dir = workspace_dir or settings.WORKSPACE_DIR
-        os.makedirs(self.workspace_dir, exist_ok=True)
 
-    def run(self, code: str) -> ExecutionResult:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, encoding="utf-8",
-            dir=self.workspace_dir,
-        ) as tmp:
-            tmp.write(code)
-            tmp_path = tmp.name
+    def run(self, code: str, language: str = "python") -> ExecutionResult:
+        try:
+            response = requests.post(
+                f"{self.executor_url}/execute",
+                json={"code": code, "language": language, "timeout": self.timeout},
+                timeout=self.timeout + 10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return ExecutionResult(**data)
+        except requests.RequestException as e:
+            return ExecutionResult(
+                success=False, stdout="",
+                stderr=f"Executor service unreachable: {e}", returncode=-1,
+            )
+
+    def run_project(
+        self, project_dir: Path, language: str, command: str, timeout: int = 120
+    ) -> ExecutionResult:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as tar:
+            tar.add(project_dir, arcname=".")
+        tar_b64 = base64.b64encode(buffer.getvalue()).decode()
 
         try:
-            process = subprocess.run(
-                [sys.executable, os.path.basename(tmp_path)],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=self.workspace_dir,
+            response = requests.post(
+                f"{self.executor_url}/execute_project",
+                json={
+                    "language": language,
+                    "command": command,
+                    "files_tar_b64": tar_b64,
+                    "timeout": timeout,
+                },
+                timeout=timeout + 30,
             )
+            response.raise_for_status()
+            data = response.json()
+            return ExecutionResult(**data)
+        except requests.RequestException as e:
             return ExecutionResult(
-                success=process.returncode == 0,
-                stdout=process.stdout.strip(),
-                stderr=process.stderr.strip(),
-                returncode=process.returncode,
+                success=False, stdout="",
+                stderr=f"Executor service unreachable: {e}", returncode=-1,
             )
-        except subprocess.TimeoutExpired:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr=f"Execution timed out after {self.timeout} seconds.",
-                returncode=-1,
-            )
-        finally:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass

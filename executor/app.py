@@ -1,186 +1,223 @@
 """
-CodeSentinel Executor Service.
+CodeSentinel Executor Service — persistent per-project containers.
 
-Two execution modes:
-  /execute          - single-file snippet, stdin-piped, network-isolated.
-                       Fast path for simple scripts (Python or Node).
-  /execute_project  - full multi-file project (already saved to disk by
-                       the main app), copied into a fresh container and
-                       run with a real command (e.g. npm install && npm
-                       run build). Requires network access for dependency
-                       installation, so isolation is intentionally looser
-                       here than in single-file mode.
-
-This service is the ONLY component with Docker socket access - the main
-agent app never touches it directly.
+Each project gets ONE long-lived container. /app/project holds the
+agent's code files; /app/.codesentinel holds internal state (currently
+just errors.json) - kept separate so error logs never appear mixed in
+with the actual generated code.
 """
 
-import base64
-import io
-import shutil
+import logging
 import subprocess
-import tarfile
-import tempfile
-import uuid
 
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
+logger = logging.getLogger("executor")
+
 app = FastAPI(title="CodeSentinel Executor")
 
 LANGUAGE_CONFIG = {
-    "python": {
-        "image": "python:3.11-slim",
-        "single_file_cmd": ["python3", "-"],
-    },
-    "node": {
-        "image": "node:20-slim",
-        "single_file_cmd": ["node", "-"],
-    },
+    "python": {"image": "codesentinel-runner-python:latest"},
+    "node": {"image": "codesentinel-runner-node:latest"},
 }
 
-DEFAULT_SINGLE_TIMEOUT = 15
-DEFAULT_PROJECT_TIMEOUT = 120
+PROJECT_DIR = "/app/project"
+META_DIR = "/app/.codesentinel"
+CONTAINER_PREFIX = "codesentinel-proj-"
+CONTAINER_UID = "1000"
+CONTAINER_GID = "1000"
 
 
-class ExecuteRequest(BaseModel):
-    code: str
+def container_name(project: str) -> str:
+    return f"{CONTAINER_PREFIX}{project}"
+
+
+def container_exists(name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "ps", "-a", "-q", "-f", f"name=^{name}$"],
+        capture_output=True, text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def container_running(name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "ps", "-q", "-f", f"name=^{name}$"],
+        capture_output=True, text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def ensure_container(project: str, language: str) -> str:
+    name = container_name(project)
+    config = LANGUAGE_CONFIG.get(language, LANGUAGE_CONFIG["python"])
+
+    if container_exists(name):
+        if not container_running(name):
+            subprocess.run(["docker", "start", name], capture_output=True, text=True)
+        return name
+
+    subprocess.run(
+        [
+            "docker", "run", "-d",
+            "--name", name,
+            "--pids-limit", "256",
+            "--memory", "512m",
+            "--memory-swap", "512m",
+            "--cpus", "1.0",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--user", f"{CONTAINER_UID}:{CONTAINER_GID}",
+            "-w", PROJECT_DIR,
+            config["image"],
+            "sh", "-c", "tail -f /dev/null",
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return name
+
+
+def write_text_to_container(name: str, remote_path: str, content: str) -> dict:
+    """
+    Generic write helper - as UID 1000, no docker cp/chown needed since
+    both PROJECT_DIR and META_DIR are pre-owned by 1000 at image build time.
+    """
+    remote_dir = "/".join(remote_path.split("/")[:-1])
+
+    mkdir_result = subprocess.run(
+        ["docker", "exec", "--user", f"{CONTAINER_UID}:{CONTAINER_GID}",
+         name, "mkdir", "-p", remote_dir],
+        capture_output=True, text=True,
+    )
+    if mkdir_result.returncode != 0:
+        return {"success": False, "stderr": f"mkdir failed: {mkdir_result.stderr}"}
+
+    write_result = subprocess.run(
+        ["docker", "exec", "-i", "--user", f"{CONTAINER_UID}:{CONTAINER_GID}",
+         name, "sh", "-c", f"cat > {remote_path}"],
+        input=content, capture_output=True, text=True,
+    )
+    if write_result.returncode != 0:
+        return {"success": False, "stderr": f"write failed: {write_result.stderr}"}
+
+    return {"success": True, "stderr": ""}
+
+
+def read_text_from_container(name: str, remote_path: str) -> str | None:
+    result = subprocess.run(
+        ["docker", "exec", name, "sh", "-c", f"cat {remote_path} 2>/dev/null"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout
+
+
+class WriteFileRequest(BaseModel):
+    project: str
     language: str = "python"
-    timeout: int = DEFAULT_SINGLE_TIMEOUT
+    file_path: str
+    content: str
 
 
-class ExecuteProjectRequest(BaseModel):
-    language: str
+class ExecRequest(BaseModel):
+    project: str
+    language: str = "python"
     command: str
-    files_tar_b64: str  # base64-encoded tar of the project directory
-    timeout: int = DEFAULT_PROJECT_TIMEOUT
+    timeout: int = 60
 
 
-class ExecuteResponse(BaseModel):
+class ExecResponse(BaseModel):
     success: bool
     stdout: str
     stderr: str
     returncode: int
 
 
-@app.post("/execute", response_model=ExecuteResponse)
-def execute(req: ExecuteRequest):
-    config = LANGUAGE_CONFIG.get(req.language)
-    if not config:
-        return ExecuteResponse(
-            success=False, stdout="",
-            stderr=f"Unsupported language: {req.language}. Supported: {list(LANGUAGE_CONFIG)}",
-            returncode=-1,
-        )
+class ErrorsWriteRequest(BaseModel):
+    project: str
+    language: str = "python"
+    content: str
 
-    container_name = f"codesentinel-exec-{uuid.uuid4().hex[:12]}"
-    cmd = [
-        "docker", "run", "--rm", "-i",
-        "--name", container_name,
-        "--network", "none",
-        "--read-only",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-        "--pids-limit", "64",
-        "--memory", "256m",
-        "--memory-swap", "256m",
-        "--cpus", "0.5",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
-        "--user", "1000:1000",
-        config["image"],
-        *config["single_file_cmd"],
-    ]
+
+@app.post("/project/write_file")
+def write_file(req: WriteFileRequest):
+    name = ensure_container(req.project, req.language)
+    rel_path = req.file_path.lstrip("/")
+    remote_path = f"{PROJECT_DIR}/{rel_path}"
+
+    result = write_text_to_container(name, remote_path, req.content)
+    logger.info(f"write_file {remote_path} -> success={result['success']}")
+    return {"success": result["success"], "path": rel_path, "stderr": result["stderr"]}
+
+
+@app.post("/project/exec", response_model=ExecResponse)
+def exec_in_project(req: ExecRequest):
+    name = ensure_container(req.project, req.language)
 
     try:
         result = subprocess.run(
-            cmd, input=req.code, capture_output=True, text=True, timeout=req.timeout,
+            ["docker", "exec", "--user", f"{CONTAINER_UID}:{CONTAINER_GID}",
+             "-w", PROJECT_DIR, name, "sh", "-c", req.command],
+            capture_output=True, text=True, timeout=req.timeout,
         )
-        return ExecuteResponse(
+        return ExecResponse(
             success=result.returncode == 0,
             stdout=result.stdout.strip(),
             stderr=result.stderr.strip(),
             returncode=result.returncode,
         )
     except subprocess.TimeoutExpired:
-        subprocess.run(["docker", "kill", container_name], capture_output=True)
-        return ExecuteResponse(
+        return ExecResponse(
             success=False, stdout="",
-            stderr=f"Execution timed out after {req.timeout} seconds.",
+            stderr=f"Command timed out after {req.timeout}s.",
             returncode=-1,
         )
 
 
-@app.post("/execute_project", response_model=ExecuteResponse)
-def execute_project(req: ExecuteProjectRequest):
-    config = LANGUAGE_CONFIG.get(req.language)
-    if not config:
-        return ExecuteResponse(
-            success=False, stdout="",
-            stderr=f"Unsupported language: {req.language}. Supported: {list(LANGUAGE_CONFIG)}",
-            returncode=-1,
-        )
+@app.post("/project/errors/write")
+def write_errors(req: ErrorsWriteRequest):
+    name = ensure_container(req.project, req.language)
+    remote_path = f"{META_DIR}/errors.json"
+    result = write_text_to_container(name, remote_path, req.content)
+    return {"success": result["success"], "stderr": result["stderr"]}
 
-    container_name = f"codesentinel-proj-{uuid.uuid4().hex[:12]}"
-    scratch_dir = tempfile.mkdtemp(prefix="cs-project-")
 
-    try:
-        tar_bytes = base64.b64decode(req.files_tar_b64)
-        with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tar:
-            tar.extractall(scratch_dir)
+@app.get("/project/{project}/errors")
+def read_errors(project: str):
+    name = container_name(project)
+    if not container_exists(name):
+        return {"content": "{}"}
+    if not container_running(name):
+        subprocess.run(["docker", "start", name], capture_output=True, text=True)
+    content = read_text_from_container(name, f"{META_DIR}/errors.json")
+    return {"content": content if content else "{}"}
 
-        subprocess.run(
-            [
-                "docker", "create",
-                "--name", container_name,
-                "--pids-limit", "256",
-                "--memory", "512m",
-                "--memory-swap", "512m",
-                "--cpus", "1.0",
-                "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges",
-                "-w", "/app/project",
-                config["image"],
-                "sh", "-c", req.command,
-            ],
-            capture_output=True, text=True, check=True, timeout=15,
-        )
 
-        subprocess.run(
-            ["docker", "cp", f"{scratch_dir}/.", f"{container_name}:/app/project"],
-            capture_output=True, text=True, check=True, timeout=30,
-        )
+@app.get("/project/{project}/files")
+def list_files(project: str):
+    name = container_name(project)
+    if not container_exists(name):
+        return {"files": []}
+    if not container_running(name):
+        subprocess.run(["docker", "start", name], capture_output=True, text=True)
+    result = subprocess.run(
+        ["docker", "exec", name, "find", PROJECT_DIR, "-type", "f"],
+        capture_output=True, text=True,
+    )
+    files = [
+        line.replace(PROJECT_DIR + "/", "")
+        for line in result.stdout.strip().splitlines() if line.strip()
+    ]
+    return {"files": files, "container": name}
 
-        result = subprocess.run(
-            ["docker", "start", "-a", container_name],
-            capture_output=True, text=True, timeout=req.timeout,
-        )
 
-        inspect = subprocess.run(
-            ["docker", "inspect", container_name, "--format", "{{.State.ExitCode}}"],
-            capture_output=True, text=True,
-        )
-        exit_code = int(inspect.stdout.strip() or "-1")
-
-        return ExecuteResponse(
-            success=exit_code == 0,
-            stdout=result.stdout.strip(),
-            stderr=result.stderr.strip(),
-            returncode=exit_code,
-        )
-    except subprocess.TimeoutExpired:
-        subprocess.run(["docker", "kill", container_name], capture_output=True)
-        return ExecuteResponse(
-            success=False, stdout="",
-            stderr=f"Execution timed out after {req.timeout} seconds.",
-            returncode=-1,
-        )
-    except subprocess.CalledProcessError as e:
-        return ExecuteResponse(
-            success=False, stdout="", stderr=f"Setup failed: {e.stderr}", returncode=-1,
-        )
-    finally:
-        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-        shutil.rmtree(scratch_dir, ignore_errors=True)
+@app.delete("/project/{project}")
+def delete_project(project: str):
+    subprocess.run(["docker", "rm", "-f", container_name(project)], capture_output=True, text=True)
+    return {"deleted": container_name(project)}
 
 
 @app.get("/health")

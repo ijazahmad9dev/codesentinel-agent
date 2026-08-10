@@ -7,8 +7,8 @@ load_dotenv()
 
 @dataclass
 class Settings:
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://machinery-push-causes-regression.trycloudflare.com")
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen3-coder-next:latest")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://fluid-variations-drilling-nhs.trycloudflare.com")
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen2.5:3b")
     ERROR_LOG_PATH: str = os.getenv("ERROR_LOG_PATH", "data/errors.json")
     EXECUTION_TIMEOUT: int = int(os.getenv("EXECUTION_TIMEOUT", "15"))
     WORKSPACE_DIR: str = os.getenv("WORKSPACE_DIR", "workspace")

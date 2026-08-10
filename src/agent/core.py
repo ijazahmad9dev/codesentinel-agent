@@ -2,10 +2,9 @@ from langchain.agents import create_agent
 from langchain_ollama import ChatOllama
 
 from src.agent.tools import (
-    execute_code,
-    execute_project_command,
     write_code_to_file,
-    list_workspace_projects,
+    execute_project_command,
+    list_project_files,
 )
 from src.agent.prompts import SYSTEM_PROMPT
 from src.config import settings
@@ -18,11 +17,6 @@ def build_agent():
         temperature=0,
     )
 
-    tools = [
-        execute_code,
-        execute_project_command,
-        write_code_to_file,
-        list_workspace_projects,
-    ]
+    tools = [write_code_to_file, execute_project_command, list_project_files]
 
     return create_agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)

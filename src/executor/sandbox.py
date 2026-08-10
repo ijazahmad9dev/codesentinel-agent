@@ -2,12 +2,7 @@
 Client for the CodeSentinel Executor service.
 """
 
-import base64
-import io
-import tarfile
 from dataclasses import dataclass
-from pathlib import Path
-
 import requests
 
 from src.config import settings
@@ -26,46 +21,45 @@ class CodeSandbox:
         self.executor_url = executor_url or settings.EXECUTOR_URL
         self.timeout = timeout or settings.EXECUTION_TIMEOUT
 
-    def run(self, code: str, language: str = "python") -> ExecutionResult:
+    def write_file(self, project: str, language: str, file_path: str, content: str) -> bool:
+        response = requests.post(
+            f"{self.executor_url}/project/write_file",
+            json={"project": project, "language": language, "file_path": file_path, "content": content},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json().get("success", False)
+
+    def run(self, project: str, language: str, command: str, timeout: int = None) -> ExecutionResult:
         try:
             response = requests.post(
-                f"{self.executor_url}/execute",
-                json={"code": code, "language": language, "timeout": self.timeout},
-                timeout=self.timeout + 10,
+                f"{self.executor_url}/project/exec",
+                json={"project": project, "language": language, "command": command, "timeout": timeout or self.timeout},
+                timeout=(timeout or self.timeout) + 15,
             )
             response.raise_for_status()
-            data = response.json()
-            return ExecutionResult(**data)
+            return ExecutionResult(**response.json())
         except requests.RequestException as e:
-            return ExecutionResult(
-                success=False, stdout="",
-                stderr=f"Executor service unreachable: {e}", returncode=-1,
-            )
+            return ExecutionResult(success=False, stdout="", stderr=f"Executor service unreachable: {e}", returncode=-1)
 
-    def run_project(
-        self, project_dir: Path, language: str, command: str, timeout: int = 120
-    ) -> ExecutionResult:
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as tar:
-            tar.add(project_dir, arcname=".")
-        tar_b64 = base64.b64encode(buffer.getvalue()).decode()
+    def list_files(self, project: str) -> list[str]:
+        response = requests.get(f"{self.executor_url}/project/{project}/files", timeout=15)
+        response.raise_for_status()
+        return response.json().get("files", [])
 
-        try:
-            response = requests.post(
-                f"{self.executor_url}/execute_project",
-                json={
-                    "language": language,
-                    "command": command,
-                    "files_tar_b64": tar_b64,
-                    "timeout": timeout,
-                },
-                timeout=timeout + 30,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return ExecutionResult(**data)
-        except requests.RequestException as e:
-            return ExecutionResult(
-                success=False, stdout="",
-                stderr=f"Executor service unreachable: {e}", returncode=-1,
-            )
+    def write_errors(self, project: str, language: str, content: str) -> bool:
+        response = requests.post(
+            f"{self.executor_url}/project/errors/write",
+            json={"project": project, "language": language, "content": content},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json().get("success", False)
+
+    def read_errors(self, project: str) -> str:
+        response = requests.get(f"{self.executor_url}/project/{project}/errors", timeout=15)
+        response.raise_for_status()
+        return response.json().get("content", "{}")
+
+    def cleanup(self, project: str) -> None:
+        requests.delete(f"{self.executor_url}/project/{project}", timeout=15)

@@ -1,9 +1,0 @@
-{
-    "4583c0036131a894": {
-        "message": "Traceback (most recent call last):\n  File \"<stdin>\", line 5, in <module>\n  File \"<stdin>\", line 2, in average\nZeroDivisionError: division by zero",
-        "traceback": "",
-        "count": 1,
-        "first_seen": "2026-08-07T07:17:14.559791",
-        "last_seen": "2026-08-07T07:17:14.559804"
-    }
-}

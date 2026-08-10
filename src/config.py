@@ -16,5 +16,8 @@ class Settings:
     EXECUTOR_URL: str = os.getenv("EXECUTOR_URL", "http://localhost:8000")
     DATA_DIR: str = os.getenv("DATA_DIR", "data")
 
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL_NAME", "openai/gpt-oss-120b")
+
 
 settings = Settings()

@@ -6,80 +6,84 @@ from langchain_core.tools import tool
 
 from src.executor.sandbox import CodeSandbox
 from src.utils.error_tracker import ErrorTracker
-from src.utils.file_manager import FileManager
+from src.utils.code_safety import check_code_safety, SafetyViolation
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 sandbox = CodeSandbox()
-tracker = ErrorTracker()
-file_manager = FileManager()
+
+_current_project = "default"
+_current_language = "python"
 
 
-@tool
-def execute_python_code(code: str) -> str:
-    """
-    Execute the given Python code in an isolated sandbox and return the result.
-    Use this to test or verify code before saving it permanently.
-    """
-    logger.info("Executing generated code.")
-    result = sandbox.run(code)
+def set_current_project(project_slug: str, language: str = "python") -> None:
+    global _current_project, _current_language
+    _current_project = project_slug
+    _current_language = language
 
-    if result.success:
-        return f"EXECUTION_SUCCESS\nSTDOUT:\n{result.stdout}"
 
-    return (
-        f"EXECUTION_FAILED\n"
-        f"RETURN_CODE: {result.returncode}\n"
-        f"STDERR:\n{result.stderr}"
-    )
+def _tracker() -> ErrorTracker:
+    return ErrorTracker(_current_project, _current_language, sandbox)
 
 
 @tool
 def write_code_to_file(file_path: str, code: str) -> str:
     """
-    Save code to a real file inside the project workspace.
-    Use this ONLY after the code has been verified working via
-    execute_python_code. Use a meaningful relative path and filename,
-    e.g. "reverse_string.py", or for multi-file projects like a FastAPI
-    backend: "app/main.py", "app/models.py", "app/routers/users.py".
-    Call this once per file for multi-file projects.
+    Save a file into this project's dedicated container. Give a path
+    relative to the project root, e.g. "main.py", "app/models.py",
+    "package.json". Prefer multiple small, purpose-specific files over one
+    large file - see the modular code guidance in your instructions.
     """
-    try:
-        saved_path = file_manager.write_file(file_path, code)
-        logger.info(f"Saved file: {saved_path}")
-        return f"FILE_SAVED: {saved_path}"
-    except ValueError as e:
-        return f"FILE_SAVE_FAILED: {e}"
+    if _current_language == "python":
+        try:
+            check_code_safety(code)
+        except SafetyViolation as e:
+            logger.warning(f"Refused unsafe file write: {e.reason}")
+            return f"REFUSED: {e.reason}"
+
+    ok = sandbox.write_file(_current_project, _current_language, file_path, code)
+    if ok:
+        logger.info(f"write_code_to_file: {file_path}")
+        return f"FILE_SAVED: {file_path} (container: codesentinel-proj-{_current_project})"
+    return f"FILE_SAVE_FAILED: {file_path}"
 
 
 @tool
-def log_execution_error(error_message: str, traceback: str = "") -> str:
+def execute_project_command(command: str) -> str:
     """
-    Log an execution error to the persistent JSON error store.
-    Call this whenever execute_python_code returns EXECUTION_FAILED.
-    Returns the occurrence count for this exact error and whether the
-    3-attempt retry limit has been reached.
+    Run a shell command inside this project's container, e.g.
+    "python3 main.py", "pip install -r requirements.txt && python3 main.py",
+    "npm install && npm run build".
     """
-    result = tracker.log_error(error_message, traceback)
-    logger.warning(f"Error logged: {result}")
-
-    if result["max_retries_reached"]:
+    tracker = _tracker()
+    attempt = tracker.record_attempt()
+    if attempt["global_limit_reached"]:
         return (
-            f"MAX_RETRIES_REACHED. This exact error has occurred "
-            f"{result['count']} times. STOP fixing and report this to the user."
+            f"GLOBAL_ATTEMPT_LIMIT_REACHED: {attempt['total_attempts']} attempts "
+            f"made without success. STOP and report this to the user."
         )
-    return f"ERROR_LOGGED. Occurrence count: {result['count']} / 3."
+
+    logger.info(f"execute_project_command [{_current_project}]: {command}")
+    result = sandbox.run(_current_project, _current_language, command)
+
+    if result.success:
+        tracker.clear_errors()
+        return f"EXECUTION_SUCCESS\nSTDOUT:\n{result.stdout}"
+
+    log_result = tracker.log_error(result.stderr or "unknown error")
+    if log_result["max_retries_reached"]:
+        return (
+            f"EXECUTION_FAILED (attempt {log_result['count']}/3)\nSTDERR:\n{result.stderr}\n\n"
+            f"MAX_RETRIES_REACHED: STOP retrying and report this failure to the user."
+        )
+    return f"EXECUTION_FAILED (attempt {log_result['count']}/3)\nSTDERR:\n{result.stderr}"
 
 
 @tool
-def clear_execution_error(error_message: str) -> str:
-    """
-    Remove an error from the persistent JSON error store once it has been
-    successfully resolved (i.e. execute_python_code returned EXECUTION_SUCCESS
-    after a fix for a previously logged error).
-    """
-    removed = tracker.clear_error(error_message)
-    if removed:
-        return "ERROR_CLEARED from log."
-    return "No matching error found in log."
+def list_project_files() -> str:
+    """List every file currently saved in this project's container."""
+    files = sandbox.list_files(_current_project)
+    if not files:
+        return "No files in this project's container yet."
+    return "Files:\n" + "\n".join(f"- {f}" for f in files)

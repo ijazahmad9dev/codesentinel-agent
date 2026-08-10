@@ -1,76 +1,53 @@
-"""
-Entry point: accepts a natural language coding task either as a CLI
-argument (single-shot) or via an interactive loop, and runs the
-self-healing agent.
-"""
-
-import sys
-
+import argparse
 from src.agent.core import build_agent
+from src.agent import tools as agent_tools
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def extract_saved_files(messages) -> list[str]:
-    """
-    Walk the message history and collect every file path the agent
-    saved via write_code_to_file.
-    """
-    saved = []
-    for msg in messages:
-        tool_calls = getattr(msg, "tool_calls", None)
-        if not tool_calls:
-            continue
-        for call in tool_calls:
-            if call.get("name") == "write_code_to_file":
-                path = call.get("args", {}).get("file_path")
-                if path:
-                    saved.append(path)
-    return saved
+def slugify(text: str) -> str:
+    return "-".join(text.lower().split())[:40]
 
 
-def run(task: str):
+def run(task: str, project: str, language: str):
+    agent_tools.set_current_project(project, language)
     agent = build_agent()
 
     result = agent.invoke(
         {"messages": [{"role": "user", "content": task}]},
-        config={"recursion_limit": 50},
+        config={"recursion_limit": 25},
     )
 
-    messages = result["messages"]
-    final_message = messages[-1]
-    saved_files = extract_saved_files(messages)
-
     print("\n" + "=" * 60)
-    print("CODESENTINEL RESULT")
+    print(f"CODESENTINEL RESULT — project: {project}")
+    print(f"Inspect with: docker exec -it codesentinel-proj-{project} sh")
     print("=" * 60)
-
-    if saved_files:
-        print("\nFiles saved to ./workspace:")
-        for f in saved_files:
-            print(f"  - {f}")
-        print()
-
-    print(final_message.content)
+    print(result["messages"][-1].content)
 
 
 def main():
-    if len(sys.argv) > 1:
-        task = " ".join(sys.argv[1:])
-        run(task)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("task", nargs="?")
+    parser.add_argument("-p", "--project")
+    parser.add_argument("-l", "--language", default="python", choices=["python", "node"])
+    args = parser.parse_args()
+
+    if args.task:
+        project = args.project or slugify(args.task)
+        run(args.task, project, args.language)
         return
 
-    print("CodeSentinel — Self-Healing Coding Agent")
-    print("Type 'exit' to quit.\n")
-
+    print("CodeSentinel — Self-Healing Coding Agent\n")
     while True:
         task = input("Task > ").strip()
         if task.lower() in {"exit", "quit"}:
             break
         if not task:
             continue
-        run(task)
+        project = input("Project (blank = auto) > ").strip() or slugify(task)
+        language = input("Language [python/node] > ").strip() or "python"
+        run(task, project, language)
 
 
 if __name__ == "__main__":

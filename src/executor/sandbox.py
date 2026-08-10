@@ -1,15 +1,9 @@
 """
-Code execution sandbox.
-Executes Python code in an isolated subprocess with a timeout,
-running inside the workspace directory so it can import already-saved
-project files (e.g. testing main.py against models.py).
+Client for the CodeSentinel Executor service.
 """
 
-import subprocess
-import sys
-import tempfile
-import os
 from dataclasses import dataclass
+import requests
 
 from src.config import settings
 
@@ -23,42 +17,49 @@ class ExecutionResult:
 
 
 class CodeSandbox:
-    def __init__(self, timeout: int = None, workspace_dir: str = None):
+    def __init__(self, executor_url: str = None, timeout: int = None):
+        self.executor_url = executor_url or settings.EXECUTOR_URL
         self.timeout = timeout or settings.EXECUTION_TIMEOUT
-        self.workspace_dir = workspace_dir or settings.WORKSPACE_DIR
-        os.makedirs(self.workspace_dir, exist_ok=True)
 
-    def run(self, code: str) -> ExecutionResult:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, encoding="utf-8",
-            dir=self.workspace_dir,
-        ) as tmp:
-            tmp.write(code)
-            tmp_path = tmp.name
+    def write_file(self, project: str, language: str, file_path: str, content: str) -> bool:
+        response = requests.post(
+            f"{self.executor_url}/project/write_file",
+            json={"project": project, "language": language, "file_path": file_path, "content": content},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json().get("success", False)
 
+    def run(self, project: str, language: str, command: str, timeout: int = None) -> ExecutionResult:
         try:
-            process = subprocess.run(
-                [sys.executable, os.path.basename(tmp_path)],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                cwd=self.workspace_dir,
+            response = requests.post(
+                f"{self.executor_url}/project/exec",
+                json={"project": project, "language": language, "command": command, "timeout": timeout or self.timeout},
+                timeout=(timeout or self.timeout) + 15,
             )
-            return ExecutionResult(
-                success=process.returncode == 0,
-                stdout=process.stdout.strip(),
-                stderr=process.stderr.strip(),
-                returncode=process.returncode,
-            )
-        except subprocess.TimeoutExpired:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr=f"Execution timed out after {self.timeout} seconds.",
-                returncode=-1,
-            )
-        finally:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+            response.raise_for_status()
+            return ExecutionResult(**response.json())
+        except requests.RequestException as e:
+            return ExecutionResult(success=False, stdout="", stderr=f"Executor service unreachable: {e}", returncode=-1)
+
+    def list_files(self, project: str) -> list[str]:
+        response = requests.get(f"{self.executor_url}/project/{project}/files", timeout=15)
+        response.raise_for_status()
+        return response.json().get("files", [])
+
+    def write_errors(self, project: str, language: str, content: str) -> bool:
+        response = requests.post(
+            f"{self.executor_url}/project/errors/write",
+            json={"project": project, "language": language, "content": content},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json().get("success", False)
+
+    def read_errors(self, project: str) -> str:
+        response = requests.get(f"{self.executor_url}/project/{project}/errors", timeout=15)
+        response.raise_for_status()
+        return response.json().get("content", "{}")
+
+    def cleanup(self, project: str) -> None:
+        requests.delete(f"{self.executor_url}/project/{project}", timeout=15)

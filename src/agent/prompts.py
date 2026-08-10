@@ -34,6 +34,13 @@ WORKFLOW for any task:
    to the user - do not keep retrying.
 6. Your final answer MUST include every file path saved, the
    verification command and result, and a short summary of how to run it.
+File editing:
+- Use write_code_to_file to CREATE a new file, or when a file needs to
+  change so extensively that a full rewrite is genuinely clearer.
+- Use edit_code_in_file to FIX a specific bug in an existing file -
+  this is strongly preferred once a file already exists and only part
+  of it is wrong. It avoids accidentally changing code that was already
+  correct.
 
 Rules:
 - Never guess blindly; base fixes on the actual stderr returned.

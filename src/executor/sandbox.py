@@ -30,6 +30,15 @@ class CodeSandbox:
         response.raise_for_status()
         return response.json().get("success", False)
 
+    def read_file(self, project: str, file_path: str) -> str | None:
+        response = requests.get(
+            f"{self.executor_url}/project/{project}/file",
+            params={"path": file_path},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json().get("content")
+
     def run(self, project: str, language: str, command: str, timeout: int = None) -> ExecutionResult:
         try:
             response = requests.post(

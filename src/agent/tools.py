@@ -87,3 +87,41 @@ def list_project_files() -> str:
     if not files:
         return "No files in this project's container yet."
     return "Files:\n" + "\n".join(f"- {f}" for f in files)
+
+@tool
+def edit_code_in_file(file_path: str, old_str: str, new_str: str) -> str:
+    """
+    Make a targeted edit to an existing file: replaces old_str with
+    new_str. old_str must match the file's current content EXACTLY
+    (including whitespace) and appear exactly once - this prevents
+    accidentally editing the wrong location. Include enough surrounding
+    context in old_str to make it unique if needed.
+
+    Prefer this over write_code_to_file when fixing a specific bug in an
+    existing file - rewriting the whole file risks changing unrelated
+    code that was already working.
+    """
+    current = sandbox.read_file(_current_project, file_path)
+    if current is None:
+        return f"EDIT_FAILED: {file_path} does not exist yet. Use write_code_to_file to create it."
+
+    count = current.count(old_str)
+    if count == 0:
+        return f"EDIT_FAILED: old_str not found in {file_path}. Re-check exact text - whitespace and indentation matter."
+    if count > 1:
+        return f"EDIT_FAILED: old_str appears {count} times in {file_path}. Include more surrounding context to make it uniquely identify one location."
+
+    updated = current.replace(old_str, new_str, 1)
+
+    if _current_language == "python":
+        try:
+            check_code_safety(updated)
+        except SafetyViolation as e:
+            logger.warning(f"Refused unsafe edit: {e.reason}")
+            return f"REFUSED: {e.reason}"
+
+    ok = sandbox.write_file(_current_project, _current_language, file_path, updated)
+    if ok:
+        logger.info(f"edit_code_in_file: {file_path}")
+        return f"FILE_EDITED: {file_path}"
+    return f"FILE_EDIT_FAILED: {file_path}"

@@ -195,6 +195,16 @@ def read_errors(project: str):
     content = read_text_from_container(name, f"{META_DIR}/errors.json")
     return {"content": content if content else "{}"}
 
+@app.get("/project/{project}/file")
+def read_file(project: str, path: str):
+    name = container_name(project)
+    if not container_exists(name):
+        return {"content": None}
+    if not container_running(name):
+        subprocess.run(["docker", "start", name], capture_output=True, text=True)
+    remote_path = f"{PROJECT_DIR}/{path.lstrip('/')}"
+    content = read_text_from_container(name, remote_path)
+    return {"content": content}
 
 @app.get("/project/{project}/files")
 def list_files(project: str):

@@ -14,6 +14,7 @@ from langchain_groq import ChatGroq
 
 from src.agent.tools import (
     write_code_to_file,
+    edit_code_in_file,
     execute_project_command,
     list_project_files,
 )
@@ -36,7 +37,7 @@ def build_agent():
 
     fallback_middleware = ModelFallbackMiddleware(fallback_model)
 
-    tools = [write_code_to_file, execute_project_command, list_project_files]
+    tools = [write_code_to_file, edit_code_in_file, execute_project_command, list_project_files]
 
     return create_agent(
         model=primary_model,

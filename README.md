@@ -1,37 +1,40 @@
 # CodeSentinel
 
-A self-healing coding agent built with LangChain. It takes a natural-language task, writes code, executes it inside an isolated per-project Docker container, and — if execution fails — reads the real error, fixes the code, and retries, up to a hard safety limit. Supports Python and Node.js/JavaScript projects.
+A self-healing coding agent built with LangChain. Describe what you want in plain language — no file names, no folder structure, no technical detail required — and it writes the code, verifies it runs, and fixes it automatically if something breaks. Supports Python and JavaScript/TypeScript (Node, Next.js, Express, etc.), auto-detected from your request.
 
 ---
 
 ## How it works
 
-1. You give it a task (and optionally a project name and language).
-2. The agent decides what files are needed and writes them with `write_code_to_file`, following a modular structure (separate files for logic, entry point, and tests — not one giant script).
-3. It verifies the code with `execute_project_command`, running the real command for that stack (`python3 main.py`, `npm install && npm run build`, etc.) inside a dedicated, isolated Docker container for that project.
-4. If it fails, the real stderr is fed back to the model, which fixes the specific file that's broken and retries.
-5. Retries stop automatically when either:
-   - The *same* error occurs 3 times in a row, or
-   - The project hits 6 total execution attempts, regardless of whether the errors differ.
-6. On success, the agent reports which files were saved and how to run them.
-
-Every project gets its **own container**, created once and reused across the whole task. Files and error logs live inside that container — nothing is written to your host filesystem — so you can inspect exactly what the agent produced with plain `docker` commands at any time.
+1. You describe what you want: *"I want a FastAPI backend for user management"*, *"build me a to-do app in Next.js"*.
+2. The agent infers the language, the project structure, and the file layout using standard professional conventions for whatever stack is implied — you never need to specify any of this yourself.
+3. It writes the files, then verifies with a simple check (e.g. confirming the code imports/compiles cleanly) — it deliberately avoids complex, fragile verification like spinning up a live server and making test requests.
+4. If verification fails, it reads the real error, makes a targeted fix to the specific broken part (not a full rewrite), and re-verifies.
+5. Retries stop automatically when either the same error repeats 3 times, or a configurable total-attempt ceiling is reached — whichever comes first.
+6. If the local Ollama model is unreachable, it falls back to a hosted Groq model automatically, mid-conversation, with no manual intervention.
+7. The final answer is written for a non-technical reader: what was built, confirmation it was verified, and the one command to run it.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────┐        ┌──────────────────────┐        ┌─────────────────────────┐
-│  codesentinel        │  HTTP  │  executor              │ docker │  codesentinel-proj-<name> │
-│  (agent, LangChain,  │ ─────► │  (FastAPI, owns the    │ ─────► │  (one persistent          │
-│  Ollama LLM)         │        │  Docker socket)         │        │  container per project)   │
-└─────────────────────┘        └──────────────────────┘        └─────────────────────────┘
+┌───────────────────────┐        ┌─────────────────────────┐
+│  codesentinel           │  API  │  E2B cloud sandbox         │
+│  (agent: LangChain      │ ────► │  (one per project,          │
+│  create_agent, Ollama   │       │  isolated, persists          │
+│  primary / Groq         │       │  across the session)         │
+│  fallback)               │       │                              │
+└───────────────────────┘        └─────────────────────────┘
 ```
 
-- **`codesentinel`** — the main agent app. No Docker socket access at all. Talks to the executor over plain HTTP.
-- **`executor`** — the *only* component with Docker socket access. Its job is narrow: create/reuse a project's container, write files into it, run commands in it, and report results back. This isolates the one component that needs elevated Docker access from the agent's own reasoning loop.
-- **`codesentinel-proj-<project>`** — a disposable-but-persistent container per project, hardened with dropped capabilities, resource limits, and a non-root user. Holds `/app/project` (the agent's code) and `/app/.codesentinel` (internal error-tracking state, kept separate from your actual code).
+There is no local Docker orchestration anymore. Each project gets its own remote E2B sandbox — an isolated cloud environment with its own filesystem — created on first use and reconnected to on subsequent calls within the same project. The agent talks to E2B directly via its SDK; there's no separate executor service or Docker socket involved.
+
+A local file (`data/e2b_sandbox_map.json`) maps project names to their E2B sandbox IDs, so a project can be reconnected across separate CLI invocations. If a sandbox has expired or been killed (E2B's persistence/pause-resume is still public beta), a fresh one is created automatically and the project starts clean — this is a known, accepted trade-off, not a guarantee of permanent state.
+
+Inside each sandbox:
+- `/home/user/project/` — the agent's generated code
+- `/home/user/.codesentinel/errors.json` — per-project error tracking and attempt counter, kept separate from your actual code
 
 ---
 
@@ -40,26 +43,19 @@ Every project gets its **own container**, created once and reused across the who
 ```
 codesentinel/
 ├── docker/
-│   └── Dockerfile                  # main agent app image
-├── executor/
-│   ├── app.py                      # FastAPI service, owns the Docker socket
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── runner-images/
-│       ├── python.Dockerfile       # pre-owned /app/project + /app/.codesentinel
-│       └── node.Dockerfile
+│   └── Dockerfile              # main agent app image (no Docker socket, no executor)
 ├── src/
-│   ├── main.py                     # CLI entry point
+│   ├── main.py                  # CLI entry point, language auto-detection, --inspect mode
 │   ├── config.py
 │   ├── agent/
-│   │   ├── core.py                 # create_agent + ChatOllama wiring
-│   │   ├── prompts.py              # system prompt (modular code rules, retry rules)
-│   │   └── tools.py                # write_code_to_file, execute_project_command, list_project_files
+│   │   ├── core.py              # create_agent + Ollama primary / Groq fallback wiring
+│   │   ├── prompts.py           # structure conventions, verification rules, non-technical output
+│   │   └── tools.py             # write_code_to_file, edit_code_in_file, execute_project_command, list_project_files
 │   ├── executor/
-│   │   └── sandbox.py              # HTTP client for the executor service
+│   │   └── sandbox.py           # E2B SDK client
 │   └── utils/
-│       ├── error_tracker.py        # per-project error tracking (lives inside the container)
-│       ├── code_safety.py          # pre-execution AST safety check
+│       ├── error_tracker.py     # per-project error tracking (lives inside the sandbox)
+│       ├── code_safety.py       # pre-execution AST safety check
 │       └── logger.py
 ├── docker-compose.yml
 ├── requirements.txt
@@ -72,51 +68,42 @@ codesentinel/
 
 ## Prerequisites
 
-- Docker and Docker Compose
-- An [Ollama](https://ollama.ai) instance reachable over HTTP — either running locally with a tunnel (e.g. Cloudflare Tunnel), or on a remote host. Ollama must be bound to `0.0.0.0`, not just `localhost`, or containers won't be able to reach it.
-- A tool-calling-capable model pulled in Ollama (e.g. `qwen2.5-coder:7b`). Not every model supports reliable tool calling — verify yours does before relying on this.
+- Docker and Docker Compose (used only to run the agent app itself — no longer needed for code execution)
+- An [E2B](https://e2b.dev) account and API key (free tier available)
+- An [Ollama](https://ollama.ai) instance reachable over HTTP, with a tool-calling-capable model pulled (e.g. `qwen2.5-coder:7b`)
+- A [Groq](https://console.groq.com) API key, used automatically as a fallback if Ollama is unreachable
 
 ---
 
 ## Setup
 
-**1. Clone and configure environment variables**
+**1. Configure environment variables**
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
-
 ```env
 OLLAMA_BASE_URL=https://your-ollama-endpoint
 MODEL_NAME=qwen2.5-coder:7b
+
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL_NAME=openai/gpt-oss-120b
+
+E2B_API_KEY=your_e2b_api_key_here
+E2B_TIMEOUT_SECONDS=3600
+
 DATA_DIR=data
-WORKSPACE_DIR=workspace
-EXECUTOR_URL=http://executor:8000
-EXECUTION_TIMEOUT=15
+EXECUTION_TIMEOUT=60
 MAX_AGENT_ITERATIONS=10
 ```
 
-**2. Build the language runner images** (these have `/app/project` and `/app/.codesentinel` pre-owned by UID 1000, avoiding a runtime chown that would otherwise be blocked by dropped capabilities)
+`MAX_AGENT_ITERATIONS` is the single configurable ceiling on total execution attempts per project — raise it for tasks that legitimately need more back-and-forth (larger multi-file scaffolds), lower it to fail faster during testing.
 
-```bash
-docker build -t codesentinel-runner-python:latest -f executor/runner-images/python.Dockerfile executor/runner-images
-docker build -t codesentinel-runner-node:latest -f executor/runner-images/node.Dockerfile executor/runner-images
-```
-
-**3. Pre-pull the base images** (avoids a first-run timeout while Docker fetches them mid-execution)
-
-```bash
-docker pull python:3.11-slim
-docker pull node:20-slim
-```
-
-**4. Build and start the executor**
+**2. Build and run**
 
 ```bash
 docker compose build
-docker compose up -d executor
 ```
 
 ---
@@ -124,97 +111,76 @@ docker compose up -d executor
 ## Running a task
 
 ```bash
-docker compose run --rm codesentinel python -m src.main "write a function that reverses a string and test it" --project reverse-demo
+docker compose run --rm codesentinel python -m src.main "I want a FastAPI backend for user management" --project user-mgmt
 ```
+
+Language is detected automatically from the task text (mentions of Next.js, React, JavaScript, npm, etc. route to Node; everything else defaults to Python) — `--language` is optional and only needed to override the guess.
 
 Options:
 
 | Flag | Description |
 |---|---|
-| `-p, --project` | Project name (namespaces the container and its files). Auto-generated from the task text if omitted. |
-| `-l, --language` | `python` (default) or `node`. |
+| `-p, --project` | Project name. Auto-generated from the task text if omitted. |
+| `-l, --language` | `python` or `node`. Auto-detected if omitted. |
+| `--inspect PROJECT` | View a project's files and error log without running a new task. |
 
-Interactive mode (no task argument) prompts for task, project, and language:
+Interactive mode:
 
 ```bash
 docker compose run --rm codesentinel python -m src.main
 ```
 
+Just answers "what would you like built?" — no project name or language prompt, both are inferred.
+
 ---
 
 ## Inspecting generated code and error logs
 
-Every project's files live inside its own container, not on your host. Use `docker exec`/`docker cp` directly:
+Since code now lives in a remote E2B sandbox rather than a local Docker container, use the built-in inspect mode rather than `docker exec`:
 
 ```bash
-# List files
-docker exec codesentinel-proj-<project> ls -la /app/project/
-
-# Read a file
-docker exec codesentinel-proj-<project> cat /app/project/main.py
-
-# View the project's error log
-docker exec codesentinel-proj-<project> cat /app/.codesentinel/errors.json
-
-# Interactive shell inside the project's container
-docker exec -it codesentinel-proj-<project> sh
-
-# Pull the whole project folder onto your host (e.g. to open in an editor)
-docker cp codesentinel-proj-<project>:/app/project ./inspect/<project>
+docker compose run --rm codesentinel python -m src.main --inspect user-mgmt
 ```
 
-To delete a project's container and start fresh:
-
-```bash
-docker rm -f codesentinel-proj-<project>
-```
+This prints every file's path and full contents, plus the project's raw error-tracking log (including the total-attempt counter), pulled live from that project's sandbox.
 
 ---
 
 ## Safety design
 
-- **Per-project container isolation** — each project runs in its own container with `--cap-drop ALL`, `--security-opt no-new-privileges`, non-root user, and CPU/memory/PID limits.
-- **Pre-execution AST check** (`code_safety.py`) — refuses obviously unsafe code (writes to system paths outside the project, use of `socket`/`subprocess`/`ctypes`) before it ever reaches the container.
-- **Automatic, per-project error tracking** — every execution attempt is logged inside the project's own container, independent of whether the model remembers to call any logging tool.
-- **Two independent retry caps**, both enforced in code, not just prompted:
-  - **3 identical errors** (normalized by error signature, not exact text — so different code attempts producing the same root-cause error still count together) → `MAX_RETRIES_REACHED`.
-  - **6 total execution attempts** for a project, regardless of whether errors repeat → `GLOBAL_ATTEMPT_LIMIT_REACHED`. This is the real backstop against a model that produces a different failure every retry, which would otherwise never trip the first cap.
-- **Modular code generation** — the system prompt requires separating logic, entry points, and tests into distinct files, and checking existing project structure (`list_project_files`) before writing, rather than regenerating everything into one file on every change.
-
-**Known trade-off:** project containers have network access by default (required for `pip install` / `npm install`), so they do **not** have the strong `--network none` isolation an ephemeral, single-file-only sandbox could offer. This is a deliberate choice for this architecture — see "Limitations" below.
+- **Pre-execution AST check** (`code_safety.py`) — refuses obviously unsafe code (writes to system paths, use of `socket`/`subprocess`/`ctypes`) before it's written.
+- **Command complexity rejection** — `execute_project_command` refuses commands that look like inline multi-line scripts (heredocs, embedded subprocess/threading wrappers) — both because they're fragile to generate correctly as structured tool-call output, and because they invite exactly the kind of unverifiable complexity the agent is instructed to avoid. The tool's schema also enforces a hard length limit on the command field itself, since structural schema constraints are respected more reliably by tool-calling models than prose instructions alone.
+- **Automatic, per-project error tracking**, stored in the project's own sandbox — not dependent on the model remembering to call a logging tool.
+- **Two independent retry caps**, both enforced in code:
+  - **3 identical errors** (normalized by error signature, so different code attempts producing the same root-cause error still count together) → stop.
+  - **`MAX_AGENT_ITERATIONS` total execution attempts** for a project, regardless of whether errors repeat → stop. This is the real backstop against a model that produces a different failure every retry.
+- **Automatic model fallback** — if Ollama is unreachable, `ModelFallbackMiddleware` transparently retries the failed call against Groq mid-conversation.
+- **Clean failure handling** — unexpected exceptions (including malformed tool-call generation from either model provider, and LangGraph recursion-limit exhaustion) are caught at the top level and reported plainly, rather than crashing with a raw traceback. Files already written are preserved either way.
 
 ---
 
 ## Troubleshooting
 
-**`Recursion limit reached` crash instead of a clean stop**
-Should not happen under normal operation — the global attempt cap is designed to stop the agent before LangGraph's recursion limit is hit. If it does, check `data`/`.codesentinel/errors.json` inside the project's container for what the agent was attempting; it likely means a tool call was silently failing without incrementing the tracked attempt count.
+**"Failed to parse tool call arguments as JSON" / `groq.BadRequestError`**
+The model generated a malformed tool call, usually while attempting an overly complex inline command. This is a known, somewhat irreducible characteristic of smaller/faster tool-calling models under complex requests — the fix is graceful failure (already handled) plus steering the model toward simpler verification via the system prompt and the command-length schema constraint, not full elimination.
 
-**Permission denied errors when the agent tries to write or run code**
-Confirm the runner images were rebuilt after any Dockerfile change:
-```bash
-docker build -t codesentinel-runner-python:latest -f executor/runner-images/python.Dockerfile executor/runner-images
-```
-Ownership must be baked in at image build time — `chown` at runtime will fail once capabilities are dropped, even as root.
+**`Request too large ... tokens per minute` from Groq**
+Groq's free tier caps tokens per request. This typically means Ollama has been down longer than expected and the whole task has been running on fallback, which has a lower capacity ceiling than local Ollama. Check your Ollama endpoint's health directly; this error is a symptom of that outage, not a bug in the task itself.
 
-**Changes to `executor/app.py` don't seem to take effect**
-`docker compose build` alone is not enough for a long-running service. Force-recreate it:
-```bash
-docker compose build
-docker compose up -d --force-recreate executor
-```
+**`GLOBAL_ATTEMPT_LIMIT_REACHED` on a project that should be fresh**
+The attempt counter is per-project and persists across separate CLI invocations, including ones that crashed for unrelated reasons (e.g. the JSON parsing bug above still increments toward the cap in some cases). If a project has accumulated attempts across multiple troubleshooting sessions, start a new project name rather than continuing to invest attempts into one that's already near its ceiling. Check with `--inspect` first.
 
-**First Node.js task times out**
-The `node:20-slim` image likely wasn't pulled yet — the pull itself can exceed `EXECUTION_TIMEOUT`. Pre-pull it: `docker pull node:20-slim`.
+**Ollama connection refused**
+Ollama must be bound to `0.0.0.0`, not `127.0.0.1` (`OLLAMA_HOST=0.0.0.0 ollama serve`). If using a tunnel (e.g. Cloudflare), confirm the URL is still live — tunnel URLs can expire or break independently of Ollama itself.
 
-**Ollama connection refused from inside the container**
-Ollama must be bound to `0.0.0.0`, not `127.0.0.1` — `OLLAMA_HOST=0.0.0.0 ollama serve`. If running Ollama on the host with Docker on native Linux, you also need `host.docker.internal` mapped via `extra_hosts` in `docker-compose.yml`, or use a tunnel URL directly.
+**A project's files seem to have disappeared between sessions**
+E2B sandbox persistence (pause/resume) is public beta with documented edge cases. If a sandbox expired or was killed, CodeSentinel creates a fresh one automatically and the project starts empty — this is accepted, silent-by-design behavior, not an error you'll be notified about explicitly. Use `--inspect` to check a project's actual current state before assuming prior work is still there.
 
 ---
 
 ## Limitations
 
-- Multi-file scaffolding for larger frameworks (a full Next.js app, for example) is a genuinely harder task for smaller local models and may hit the retry caps more often than single-file Python tasks — this is a model-capability ceiling, not a pipeline bug.
-- Project containers have network access by default, which is necessary for dependency installation but is a real (and intentional) isolation trade-off compared to a fully network-isolated sandbox.
-- The pre-execution AST safety check is a best-effort static layer, not a substitute for the container-level isolation (dropped capabilities, resource limits) — it catches obvious cases, not everything.
-- `docker exec` without an explicit `--user` flag falls back to the image's configured user, not the `--user` passed at `docker run` time — every exec call in `executor/app.py` pins `--user` explicitly for this reason; keep that pattern if extending the executor further.
+- Multi-file scaffolding for larger frameworks is a genuinely harder task for smaller local/fallback models and may hit retry caps more often than single-file Python tasks — a model-capability ceiling, not a pipeline bug.
+- E2B sandbox persistence is public beta; long-term project state across sessions is best-effort, not guaranteed.
+- The pre-execution AST safety check and command-complexity rejection are best-effort layers, not exhaustive guarantees — they reduce risk and failure rate, they don't eliminate either category entirely.
+- The Groq fallback has a materially lower per-request token capacity than local Ollama, and is intended as a stopgap for outages, not a primary driver for large multi-file tasks.

@@ -1,52 +1,131 @@
+"""
+Entry point: run a coding task, or inspect an existing project's
+sandbox (files + error log) without running a new task.
+"""
+
 import argparse
+import json
+import re
+
+from langgraph.errors import GraphRecursionError
+
 from src.agent.core import build_agent
 from src.agent import tools as agent_tools
+from src.executor.sandbox import CodeSandbox
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+NODE_KEYWORDS = [
+    "next.js", "nextjs", "next js", "react", "express", "node.js", "nodejs",
+    "node js", "javascript", "typescript", "npm", "vue", "svelte",
+]
 
 
 def slugify(text: str) -> str:
     return "-".join(text.lower().split())[:40]
 
 
+def detect_language(task: str) -> str:
+    """
+    Infers python vs node from the task text so a non-technical user
+    never needs to know or pass --language themselves. Defaults to
+    python when nothing node-related is mentioned.
+    """
+    lowered = task.lower()
+    for keyword in NODE_KEYWORDS:
+        if keyword in lowered:
+            return "node"
+    return "python"
+
+
 def run(task: str, project: str, language: str):
     agent_tools.set_current_project(project, language)
     agent = build_agent()
 
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": task}]},
-        config={"recursion_limit": 25},
-    )
+    try:
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": task}]},
+            config={"recursion_limit": 25},
+        )
+    except GraphRecursionError:
+        print("\n" + "=" * 60)
+        print("Result")
+        print("=" * 60)
+        print(
+            "This took more steps than expected and didn't finish cleanly. "
+            f"Anything already built is saved - check with: "
+            f"python -m src.main --inspect {project}"
+        )
+        return
+    except Exception as e:
+        print("\n" + "=" * 60)
+        print("Result")
+        print("=" * 60)
+        print(
+            f"Something went wrong while building this: {e}\n"
+            f"Anything already built so far is saved - check with: "
+            f"python -m src.main --inspect {project}"
+        )
+        return
 
     print("\n" + "=" * 60)
-    print(f"CODESENTINEL RESULT — project: {project}")
-    print(f"Inspect with: docker exec -it codesentinel-proj-{project} sh")
+    print("Result")
     print("=" * 60)
     print(result["messages"][-1].content)
+
+
+def inspect(project: str):
+    sandbox = CodeSandbox()
+
+    files = sandbox.list_files(project)
+    print(f"\n=== Files in project '{project}' ===")
+    if not files:
+        print("(none found - project may not exist, or its sandbox expired)")
+    for f in files:
+        print(f"- {f}")
+
+    # for f in files:
+    #     content = sandbox.read_file(project, f)
+    #     print(f"\n--- {f} ---")
+    #     print(content if content is not None else "(could not read)")
+
+    print(f"\n=== Error log ===")
+    raw_errors = sandbox.read_errors(project)
+    try:
+        print(json.dumps(json.loads(raw_errors), indent=2))
+    except json.JSONDecodeError:
+        print(raw_errors)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("task", nargs="?")
     parser.add_argument("-p", "--project")
-    parser.add_argument("-l", "--language", default="python", choices=["python", "node"])
+    parser.add_argument("-l", "--language", choices=["python", "node"],
+                         help="Optional - auto-detected from the task if omitted")
+    parser.add_argument("--inspect", metavar="PROJECT")
     args = parser.parse_args()
+
+    if args.inspect:
+        inspect(args.inspect)
+        return
 
     if args.task:
         project = args.project or slugify(args.task)
-        run(args.task, project, args.language)
+        language = args.language or detect_language(args.task)
+        run(args.task, project, language)
         return
 
-    print("CodeSentinel — Self-Healing Coding Agent\n")
+    print("CodeSentinel\n")
     while True:
-        task = input("Task > ").strip()
+        task = input("What would you like built? > ").strip()
         if task.lower() in {"exit", "quit"}:
             break
         if not task:
             continue
-        project = input("Project (blank = auto) > ").strip() or slugify(task)
-        language = input("Language [python/node] > ").strip() or "python"
+        project = slugify(task)
+        language = detect_language(task)
         run(task, project, language)
 
 

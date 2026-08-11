@@ -1,7 +1,11 @@
 """
-Error tracking utility, backed by the project's own container.
-Reads/writes /app/.codesentinel/errors.json INSIDE the project container
-via the executor service - no host filesystem involvement at all.
+Error tracking utility, backed by the project's own E2B sandbox.
+
+Two independent caps:
+  - MAX_RETRIES: same normalized error occurring 3 times in a row.
+  - Global total-attempt ceiling: pulled from settings.MAX_AGENT_ITERATIONS,
+    so it's one configurable value (.env) instead of a hardcoded constant
+    disconnected from the rest of the agent's iteration budget.
 """
 
 import json
@@ -10,16 +14,17 @@ from datetime import datetime
 from typing import Dict, Any
 
 from src.executor.sandbox import CodeSandbox
+from src.config import settings
 
 
 class ErrorTracker:
     MAX_RETRIES = 3
-    MAX_TOTAL_ATTEMPTS = 6
 
     def __init__(self, project: str, language: str = "python", sandbox: CodeSandbox = None):
         self.project = project
         self.language = language
         self.sandbox = sandbox or CodeSandbox()
+        self.max_total_attempts = settings.MAX_AGENT_ITERATIONS
 
     def _read(self) -> Dict[str, Any]:
         raw = self.sandbox.read_errors(self.project)
@@ -71,10 +76,14 @@ class ErrorTracker:
         self._write(data)
         return {
             "total_attempts": meta["total_attempts"],
-            "global_limit_reached": meta["total_attempts"] > self.MAX_TOTAL_ATTEMPTS,
+            "global_limit_reached": meta["total_attempts"] > self.max_total_attempts,
         }
 
     def clear_errors(self) -> None:
         data = self._read()
         meta = data.get("_meta")
         self._write({"_meta": meta} if meta else {})
+
+    def reset(self) -> None:
+        """Fully clears this project's error state, including the attempt counter."""
+        self._write({})

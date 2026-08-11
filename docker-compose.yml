@@ -6,27 +6,7 @@ services:
     container_name: codesentinel-agent
     env_file:
       - .env
-    environment:
-      - EXECUTOR_URL=http://executor:8000
     volumes:
       - ./data:/app/data
-      - ./workspace:/app/workspace
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    depends_on:
-      - executor
     stdin_open: true
     tty: true
-
-  executor:
-    build:
-      context: ./executor
-    container_name: codesentinel-executor
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped

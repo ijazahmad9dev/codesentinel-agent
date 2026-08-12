@@ -7,8 +7,8 @@ load_dotenv()
 
 @dataclass
 class Settings:
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen2.5-coder:7b")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "https://joke-abilities-assistant-ticket.trycloudflare.com")
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen3-coder-next:latest")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL_NAME", "openai/gpt-oss-120b")
     E2B_API_KEY: str = os.getenv("E2B_API_KEY", "")

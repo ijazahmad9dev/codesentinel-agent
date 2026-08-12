@@ -5,21 +5,29 @@ sandbox (files + error log) without running a new task.
 
 import argparse
 import json
-import re
 
-from langgraph.errors import GraphRecursionError
-
-from src.agent.core import build_agent
-from src.agent import tools as agent_tools
+from src.agent.graph.build import build_graph
+from src.config import settings
 from src.executor.sandbox import CodeSandbox
+from src.utils.error_tracker import ErrorTracker
 from src.utils.logger import get_logger
-from src.utils.describe_model_usage import describe_models_used
+
 logger = get_logger(__name__)
 
 NODE_KEYWORDS = [
     "next.js", "nextjs", "next js", "react", "express", "node.js", "nodejs",
     "node js", "javascript", "typescript", "npm", "vue", "svelte",
 ]
+
+NODE_LABELS = {
+    "planner": "Planner",
+    "coding_agent": "Coding Agent",
+    "tester": "Tester",
+    "fix_from_tests": "Coding Agent (fixing test failure)",
+    "reviewer": "Reviewer",
+    "fix_from_review": "Coding Agent (fixing review finding)",
+    "final_aggregate": "Finalizing",
+}
 
 
 def slugify(text: str) -> str:
@@ -38,25 +46,51 @@ def detect_language(task: str) -> str:
             return "node"
     return "python"
 
+
+def get_total_attempts(project: str, language: str) -> int:
+    tracker = ErrorTracker(project, language, CodeSandbox())
+    return tracker._read().get("_meta", {}).get("total_attempts", 0)
+
+
 def run(task: str, project: str, language: str):
-    agent_tools.set_current_project(project, language)
-    agent = build_agent()
+    graph = build_graph()
+
+    initial_state = {
+        "task": task, "project": project, "language": language,
+        "subtasks": [], "current_index": 0, "results": [],
+        "models_used": [], "final_summary": "",
+        "test_status": "pending", "test_output": "", "test_round": 0,
+        "review_status": "pending", "review_output": "", "review_round": 0,
+    }
+
+    state = dict(initial_state)
+    plan_printed = False
 
     try:
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": task}]},
-            config={"recursion_limit": 25},
-        )
-    except GraphRecursionError:
-        print("\n" + "=" * 60)
-        print("Result")
-        print("=" * 60)
-        print(
-            "This took more steps than expected and didn't finish cleanly. "
-            f"Anything already built is saved - check with: "
-            f"python -m src.main --inspect {project}"
-        )
-        return
+        for update in graph.stream(initial_state, config={"recursion_limit": 60}, stream_mode="updates"):
+            for node_name, node_update in update.items():
+                state.update(node_update)
+
+                label = NODE_LABELS.get(node_name, node_name)
+                progress = ""
+                if node_name == "coding_agent":
+                    progress = f" [step {state['current_index']}/{len(state['subtasks'])}]"
+                elif node_name == "tester":
+                    progress = f" [round {state['test_round']}]"
+                elif node_name == "reviewer":
+                    progress = f" [round {state['review_round']}]"
+
+                total_attempts = get_total_attempts(project, language)
+                print(f"→ [{label}]{progress}  (total attempts so far: {total_attempts})")
+
+                if not plan_printed and state.get("subtasks"):
+                    print("\n" + "=" * 60)
+                    print("Plan")
+                    print("=" * 60)
+                    for i, step in enumerate(state["subtasks"], 1):
+                        print(f"{i}. {step}")
+                    print()
+                    plan_printed = True
     except Exception as e:
         print("\n" + "=" * 60)
         print("Result")
@@ -68,21 +102,31 @@ def run(task: str, project: str, language: str):
         )
         return
 
-    models_used = describe_models_used(result["messages"])
-
     print("\n" + "=" * 60)
     print("Result")
     print("=" * 60)
-    print(result["messages"][-1].content)
 
+    total_attempts = get_total_attempts(project, language)
+    if total_attempts >= settings.MAX_AGENT_ITERATIONS:
+        completed = state["current_index"]
+        planned = len(state["subtasks"])
+        print(
+            f"⚠ STOPPED: reached the maximum attempt limit "
+            f"({total_attempts}/{settings.MAX_AGENT_ITERATIONS} attempts).\n"
+            f"Completed {completed} of {planned} planned steps before stopping.\n"
+        )
+
+    print(state["final_summary"])
+    print(f"\nTests: {state['test_status']}  |  Review: {state['review_status']}")
+
+    models_used = list(dict.fromkeys(state["models_used"]))
     print("\n" + "-" * 60)
     if len(models_used) > 1:
-        print(f"⚠ Model used: {' → '.join(models_used)} (fallback occurred mid-task)")
+        print(f"⚠ Models used: {' → '.join(models_used)} (fallback occurred)")
     elif models_used:
         print(f"Model used: {models_used[0]}")
-    else:
-        print("Model used: (could not be determined from response metadata)")
     print("-" * 60)
+
 
 def inspect(project: str):
     sandbox = CodeSandbox()

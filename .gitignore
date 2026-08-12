@@ -7,3 +7,7 @@ inspect/*
 data
 data/*
 .git
+
+project/
+project/*
+download_project.py

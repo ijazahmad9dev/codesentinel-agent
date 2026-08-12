@@ -13,7 +13,8 @@ from src.agent.core import build_agent
 from src.agent import tools as agent_tools
 from src.executor.sandbox import CodeSandbox
 from src.utils.logger import get_logger
-from src.utils.describe_model_usage import describe_models_used
+from src.agent.graph.build import build_graph
+
 logger = get_logger(__name__)
 
 NODE_KEYWORDS = [
@@ -39,24 +40,29 @@ def detect_language(task: str) -> str:
     return "python"
 
 def run(task: str, project: str, language: str):
-    agent_tools.set_current_project(project, language)
-    agent = build_agent()
+
+    graph = build_graph()
+
+    initial_state = {
+        "task": task, "project": project, "language": language,
+        "subtasks": [], "current_index": 0, "results": [],
+        "models_used": [], "final_summary": "",
+    }
+
+    plan_printed = False
+    final_state = initial_state
 
     try:
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": task}]},
-            config={"recursion_limit": 25},
-        )
-    except GraphRecursionError:
-        print("\n" + "=" * 60)
-        print("Result")
-        print("=" * 60)
-        print(
-            "This took more steps than expected and didn't finish cleanly. "
-            f"Anything already built is saved - check with: "
-            f"python -m src.main --inspect {project}"
-        )
-        return
+        for state in graph.stream(initial_state, config={"recursion_limit": 50}, stream_mode="values"):
+            final_state = state
+            if not plan_printed and state.get("subtasks"):
+                print("\n" + "=" * 60)
+                print("Plan")
+                print("=" * 60)
+                for i, step in enumerate(state["subtasks"], 1):
+                    print(f"{i}. {step}")
+                print()
+                plan_printed = True
     except Exception as e:
         print("\n" + "=" * 60)
         print("Result")
@@ -68,20 +74,19 @@ def run(task: str, project: str, language: str):
         )
         return
 
-    models_used = describe_models_used(result["messages"])
-
-    print("\n" + "=" * 60)
+    print("=" * 60)
     print("Result")
     print("=" * 60)
-    print(result["messages"][-1].content)
+    print(final_state["final_summary"])
 
+    models_used = list(dict.fromkeys(final_state["models_used"]))
     print("\n" + "-" * 60)
     if len(models_used) > 1:
-        print(f"⚠ Model used: {' → '.join(models_used)} (fallback occurred mid-task)")
+        print(f"⚠ Models used: {' → '.join(models_used)} (fallback occurred)")
     elif models_used:
         print(f"Model used: {models_used[0]}")
     else:
-        print("Model used: (could not be determined from response metadata)")
+        print("Model used: (could not be determined)")
     print("-" * 60)
 
 def inspect(project: str):

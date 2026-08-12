@@ -8,5 +8,6 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      - ./project:/app/project
     stdin_open: true
     tty: true

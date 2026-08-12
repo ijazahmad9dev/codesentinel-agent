@@ -10,3 +10,6 @@ class GraphState(TypedDict):
     results: list[str]
     models_used: list[str]
     final_summary: str
+    test_status: str 
+    test_output: str
+    test_round: int

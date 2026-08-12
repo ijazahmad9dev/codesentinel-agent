@@ -1,10 +1,3 @@
-"""
-Persists the generated plan as PLAN.md inside the project's own sandbox
-- visible in the project directory alongside the generated code, not
-hidden in .codesentinel. Rewritten after each completed step so
-checkboxes reflect real progress.
-"""
-
 from src.executor.sandbox import CodeSandbox
 
 

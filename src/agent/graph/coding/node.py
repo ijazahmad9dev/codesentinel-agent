@@ -1,34 +1,13 @@
-"""
-Graph node implementations. coding_agent_node wraps the existing,
-unchanged coding agent from src/agent/core.py - this file only controls
-invocation (once per subtask, with plan context) and progress tracking,
-never touches the coding agent's internals.
-"""
-
 from langgraph.errors import GraphRecursionError
 
 from src.agent.core import build_coding_agent
-from src.agent.graph.planner import generate_plan
 from src.agent.graph.state import GraphState
+from src.agent.graph.planner.plan_store import write_plan
 from src.agent import tools as agent_tools
 from src.executor.sandbox import CodeSandbox
 from src.utils.model_info import collect_models_used
-from src.utils.plan_store import write_plan
 
 sandbox = CodeSandbox()
-
-
-def planner_node(state: GraphState) -> dict:
-    subtasks, model_name = generate_plan(state["task"])
-
-    write_plan(sandbox, state["project"], state["language"], state["task"], subtasks, completed_index=-1)
-
-    return {
-        "subtasks": subtasks,
-        "current_index": 0,
-        "results": [],
-        "models_used": [model_name] if model_name else [],
-    }
 
 
 def coding_agent_node(state: GraphState) -> dict:
@@ -82,5 +61,39 @@ def route_after_coding(state: GraphState) -> str:
     return "aggregate"
 
 
-def aggregate_node(state: GraphState) -> dict:
-    return {"final_summary": "\n\n".join(state["results"])} 
+def fix_node(state: GraphState) -> dict:
+    """
+    Invoked when the tester reports a failure. Same coding agent,
+    different context: given the real test failure output and asked to
+    fix the specific broken code.
+    """
+    agent_tools.set_current_project(state["project"], state["language"])
+    agent = build_coding_agent()
+
+    context = (
+        f"The test suite for this project just failed. Here is the real "
+        f"output from running the tests:\n\n{state['test_output']}\n\n"
+        f"Investigate the failure(s) and fix the actual application code "
+        f"causing them - do not just modify the tests to make them pass "
+        f"unless the test itself is genuinely wrong. Use edit_code_in_file "
+        f"for targeted fixes where possible. This is part of an automated "
+        f"pipeline - do not ask whether to continue."
+    )
+
+    models = []
+    try:
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": context}]},
+            config={"recursion_limit": 25},
+        )
+        models = collect_models_used(result["messages"])
+        fix_summary = result["messages"][-1].content
+    except GraphRecursionError:
+        fix_summary = "Fix attempt did not converge in time."
+    except Exception as e:
+        fix_summary = f"Fix attempt failed unexpectedly: {e}"
+
+    return {
+        "results": state["results"] + [f"Fix attempt (round {state['test_round']}): {fix_summary}"],
+        "models_used": state["models_used"] + models,
+    }

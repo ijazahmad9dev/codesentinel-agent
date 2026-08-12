@@ -1,16 +1,7 @@
-"""
-Planner logic: plain text completion (no tool-calling), parsed with a
-regex. Deliberately avoids structured output / tool calls given how
-often complex JSON generation has failed under this project's fallback
-model - a numbered list is far more robust to parse and to generate
-correctly. Any parsing failure or exception falls back to a single-step
-plan, so the planner can never hard-fail the pipeline.
-"""
-
 import re
 
 from src.agent.core import build_planner_model
-from src.agent.graph.planner_prompt import PLANNER_SYSTEM_PROMPT
+from src.agent.graph.planner.prompt import PLANNER_SYSTEM_PROMPT
 from src.utils.model_info import get_model_name
 
 

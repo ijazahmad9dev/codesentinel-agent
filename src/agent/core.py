@@ -33,6 +33,20 @@ def build_chat_models():
     )
     return primary_model, fallback_model
 
+def build_reviewer_agent():
+    from src.agent.graph.reviewer.prompt import REVIEWER_SYSTEM_PROMPT
+
+    primary_model, fallback_model = build_chat_models()
+    fallback_middleware = ModelFallbackMiddleware(fallback_model)
+
+    tools = [view_file, execute_project_command, list_project_files]
+
+    return create_agent(
+        model=primary_model,
+        tools=tools,
+        system_prompt=REVIEWER_SYSTEM_PROMPT,
+        middleware=[fallback_middleware],
+    )
 
 def build_coding_agent():
     """

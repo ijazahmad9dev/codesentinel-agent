@@ -23,6 +23,17 @@ TEST_COMMANDS = {
 
 
 def tester_node(state: GraphState) -> dict:
+    from src.utils.error_tracker import ErrorTracker
+    from src.executor.sandbox import CodeSandbox
+
+    tracker = ErrorTracker(state["project"], state["language"], CodeSandbox())
+    if tracker.is_exhausted():
+        return {
+            "test_status": "skipped",
+            "test_output": "Skipped - attempt budget already exhausted before testing could run.",
+            "test_round": state["test_round"],
+        }
+    
     project, language = state["project"], state["language"]
     round_num = state["test_round"] + 1
 

@@ -1,3 +1,10 @@
+"""
+Coding-agent graph nodes: the main subtask loop, plus the two fix nodes
+triggered by a failing test or a failing review. All three wrap the
+same underlying coding agent from src/agent/core.py - only invocation
+context and looping/budget logic live here.
+"""
+
 from langgraph.errors import GraphRecursionError
 
 from src.agent.core import build_coding_agent
@@ -5,9 +12,14 @@ from src.agent.graph.state import GraphState
 from src.agent.graph.planner.plan_store import write_plan
 from src.agent import tools as agent_tools
 from src.executor.sandbox import CodeSandbox
+from src.utils.error_tracker import ErrorTracker
 from src.utils.model_info import collect_models_used
 
 sandbox = CodeSandbox()
+
+
+def _tracker_for(state: GraphState) -> ErrorTracker:
+    return ErrorTracker(state["project"], state["language"], CodeSandbox())
 
 
 def coding_agent_node(state: GraphState) -> dict:
@@ -56,28 +68,32 @@ def coding_agent_node(state: GraphState) -> dict:
 
 
 def route_after_coding(state: GraphState) -> str:
+    """
+    Checks the attempt budget BEFORE starting the next subtask or
+    handing off to the tester. Without this, a plan could keep running
+    every remaining step (and then a full tester round) even after the
+    budget was already exhausted, since current_index/len(subtasks)
+    alone doesn't know anything about attempts spent.
+    """
+    if _tracker_for(state).is_exhausted():
+        return "final_aggregate"
     if state["current_index"] < len(state["subtasks"]):
         return "coding_agent"
-    return "aggregate"
+    return "tester"
 
 
-def fix_node(state: GraphState) -> dict:
-    """
-    Invoked when the tester reports a failure. Same coding agent,
-    different context: given the real test failure output and asked to
-    fix the specific broken code.
-    """
+def _run_fix(state: GraphState, failure_output: str, reason: str) -> dict:
     agent_tools.set_current_project(state["project"], state["language"])
     agent = build_coding_agent()
 
     context = (
-        f"The test suite for this project just failed. Here is the real "
-        f"output from running the tests:\n\n{state['test_output']}\n\n"
-        f"Investigate the failure(s) and fix the actual application code "
-        f"causing them - do not just modify the tests to make them pass "
-        f"unless the test itself is genuinely wrong. Use edit_code_in_file "
-        f"for targeted fixes where possible. This is part of an automated "
-        f"pipeline - do not ask whether to continue."
+        f"A {reason} just reported a problem with this project. "
+        f"Here is the real output:\n\n{failure_output}\n\n"
+        f"Investigate and fix the actual application code causing this - "
+        f"do not just modify tests to make them pass unless the test "
+        f"itself is genuinely wrong. Use edit_code_in_file for targeted "
+        f"fixes where possible. This is part of an automated pipeline - "
+        f"do not ask whether to continue."
     )
 
     models = []
@@ -94,6 +110,14 @@ def fix_node(state: GraphState) -> dict:
         fix_summary = f"Fix attempt failed unexpectedly: {e}"
 
     return {
-        "results": state["results"] + [f"Fix attempt (round {state['test_round']}): {fix_summary}"],
+        "results": state["results"] + [f"Fix ({reason}): {fix_summary}"],
         "models_used": state["models_used"] + models,
     }
+
+
+def fix_from_tests_node(state: GraphState) -> dict:
+    return _run_fix(state, state["test_output"], "failing test")
+
+
+def fix_from_review_node(state: GraphState) -> dict:
+    return _run_fix(state, state["review_output"], "code review")

@@ -87,3 +87,11 @@ class ErrorTracker:
     def reset(self) -> None:
         """Fully clears this project's error state, including the attempt counter."""
         self._write({})
+
+    def is_exhausted(self) -> bool:
+        """Read-only check - does NOT increment the counter. Use this for
+        routing decisions; use record_attempt() only from inside an actual
+        tool call that represents real work being attempted."""
+        data = self._read()
+        total = data.get("_meta", {}).get("total_attempts", 0)
+        return total >= self.max_total_attempts

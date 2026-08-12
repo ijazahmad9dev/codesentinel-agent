@@ -32,6 +32,16 @@ class ExecuteCommandInput(BaseModel):
         ),
     )
 
+class WriteFileInput(BaseModel):
+    file_path: str = Field(
+        ...,
+        description="REQUIRED. The relative path to save this file at, e.g. 'src/App.jsx', 'package.json'. Never omit this field.",
+    )
+    code: str = Field(
+        ...,
+        description="The full file content to write.",
+    )
+
 class EditFileInput(BaseModel):
     file_path: str = Field(..., description="Relative path of the file to edit.")
     old_str: str = Field(
@@ -88,7 +98,28 @@ def _tracker() -> ErrorTracker:
     return ErrorTracker(_current_project, _current_language, sandbox)
 
 
-@tool
+# @tool
+# def write_code_to_file(file_path: str, code: str) -> str:
+#     """
+#     Save a file into this project's dedicated container. Give a path
+#     relative to the project root, e.g. "main.py", "app/models.py",
+#     "package.json". Prefer multiple small, purpose-specific files over one
+#     large file - see the modular code guidance in your instructions.
+#     """
+#     if _current_language == "python":
+#         try:
+#             check_code_safety(code)
+#         except SafetyViolation as e:
+#             logger.warning(f"Refused unsafe file write: {e.reason}")
+#             return f"REFUSED: {e.reason}"
+
+#     ok = sandbox.write_file(_current_project, _current_language, file_path, code)
+#     if ok:
+#         logger.info(f"write_code_to_file: {file_path}")
+#         return f"FILE_SAVED: {file_path} (container: codesentinel-proj-{_current_project})"
+#     return f"FILE_SAVE_FAILED: {file_path}"
+
+@tool("write_code_to_file", args_schema=WriteFileInput)
 def write_code_to_file(file_path: str, code: str) -> str:
     """
     Save a file into this project's dedicated container. Give a path
@@ -96,6 +127,15 @@ def write_code_to_file(file_path: str, code: str) -> str:
     "package.json". Prefer multiple small, purpose-specific files over one
     large file - see the modular code guidance in your instructions.
     """
+    tracker = _tracker()
+    attempt = tracker.record_attempt()
+    if attempt["global_limit_reached"]:
+        return (
+            f"GLOBAL_ATTEMPT_LIMIT_REACHED: {attempt['total_attempts']} attempts "
+            f"made without success (limit: {tracker.max_total_attempts}). "
+            f"STOP and report this to the user."
+        )
+
     if _current_language == "python":
         try:
             check_code_safety(code)
@@ -105,8 +145,9 @@ def write_code_to_file(file_path: str, code: str) -> str:
 
     ok = sandbox.write_file(_current_project, _current_language, file_path, code)
     if ok:
+        tracker.clear_errors()
         logger.info(f"write_code_to_file: {file_path}")
-        return f"FILE_SAVED: {file_path} (container: codesentinel-proj-{_current_project})"
+        return f"FILE_SAVED: {file_path}"
     return f"FILE_SAVE_FAILED: {file_path}"
 
 @tool

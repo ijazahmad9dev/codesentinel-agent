@@ -19,4 +19,7 @@ def planner_node(state: GraphState) -> dict:
         "test_status": "pending",
         "test_output": "",
         "test_round": 0,
+        "review_status": "pending",
+        "review_output": "",
+        "review_round": 0,
     }

@@ -13,7 +13,7 @@ from src.agent.core import build_agent
 from src.agent import tools as agent_tools
 from src.executor.sandbox import CodeSandbox
 from src.utils.logger import get_logger
-
+from src.utils.describe_model_usage import describe_models_used
 logger = get_logger(__name__)
 
 NODE_KEYWORDS = [
@@ -37,7 +37,6 @@ def detect_language(task: str) -> str:
         if keyword in lowered:
             return "node"
     return "python"
-
 
 def run(task: str, project: str, language: str):
     agent_tools.set_current_project(project, language)
@@ -69,11 +68,21 @@ def run(task: str, project: str, language: str):
         )
         return
 
+    models_used = describe_models_used(result["messages"])
+
     print("\n" + "=" * 60)
     print("Result")
     print("=" * 60)
     print(result["messages"][-1].content)
 
+    print("\n" + "-" * 60)
+    if len(models_used) > 1:
+        print(f"⚠ Model used: {' → '.join(models_used)} (fallback occurred mid-task)")
+    elif models_used:
+        print(f"Model used: {models_used[0]}")
+    else:
+        print("Model used: (could not be determined from response metadata)")
+    print("-" * 60)
 
 def inspect(project: str):
     sandbox = CodeSandbox()

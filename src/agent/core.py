@@ -17,6 +17,7 @@ from src.agent.tools import (
     edit_code_in_file,
     execute_project_command,
     list_project_files,
+    view_file,
 )
 from src.agent.prompts import SYSTEM_PROMPT
 from src.config import settings
@@ -37,7 +38,7 @@ def build_agent():
 
     fallback_middleware = ModelFallbackMiddleware(fallback_model)
 
-    tools = [write_code_to_file, edit_code_in_file, execute_project_command, list_project_files]
+    tools = [write_code_to_file, edit_code_in_file, execute_project_command, list_project_files, view_file]
 
     return create_agent(
         model=primary_model,

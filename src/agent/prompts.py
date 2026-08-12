@@ -68,6 +68,11 @@ WORKFLOW for any task:
    or internal error-tracking mechanics.
 
 File editing:
+- Before editing an existing file with edit_code_in_file, use view_file
+  to see its exact current content - copy old_str from there rather than
+  reconstructing it from memory or from output of shell commands like
+  cat/sed. This avoids whitespace/indentation mismatches that cause
+  false "not found" failures.
 - Use write_code_to_file to CREATE a new file, or when a file needs to
   change so extensively that a full rewrite is genuinely clearer.
 - Use edit_code_in_file to FIX a specific bug in an existing file - this

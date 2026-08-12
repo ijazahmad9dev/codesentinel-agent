@@ -8,6 +8,8 @@ from src.executor.sandbox import CodeSandbox
 from src.utils.error_tracker import ErrorTracker
 from src.utils.code_safety import check_code_safety, SafetyViolation
 from src.utils.logger import get_logger
+from pydantic import BaseModel, Field
+import difflib
 
 logger = get_logger(__name__)
 
@@ -15,9 +17,6 @@ sandbox = CodeSandbox()
 
 _current_project = "default"
 _current_language = "python"
-
-from pydantic import BaseModel, Field
-
 
 class ExecuteCommandInput(BaseModel):
     command: str = Field(
@@ -32,6 +31,37 @@ class ExecuteCommandInput(BaseModel):
             "to run that file, e.g. 'python3 verify_server.py'."
         ),
     )
+
+class EditFileInput(BaseModel):
+    file_path: str = Field(..., description="Relative path of the file to edit.")
+    old_str: str = Field(
+        ...,
+        max_length=500,
+        description=(
+            "The EXACT existing text to replace - must match the file "
+            "character-for-character and appear exactly once. Keep this "
+            "SHORT and TARGETED (a few lines at most) - just enough "
+            "surrounding context to make it unique. Do NOT pass large "
+            "blocks of code here; larger exact-match strings are far more "
+            "likely to fail on a whitespace mismatch, and large arguments "
+            "are more likely to cause tool-call generation errors. If the "
+            "change is large or spans much of the file, use "
+            "write_code_to_file instead."
+        ),
+    )
+    new_str: str = Field(..., max_length=500, description="The replacement text.")
+
+def _find_near_misses(current: str, old_str: str) -> str:
+    file_lines = current.splitlines()
+    target_line = old_str.splitlines()[0] if old_str.splitlines() else old_str
+    matches = difflib.get_close_matches(target_line, file_lines, n=3, cutoff=0.6)
+    if not matches:
+        return ""
+    hints = []
+    for m in matches:
+        line_no = file_lines.index(m) + 1
+        hints.append(f"  line {line_no}: {m}")
+    return "\nClosest similar lines found:\n" + "\n".join(hints)
 
 def _is_overly_complex_command(command: str) -> str | None:
     """
@@ -79,6 +109,20 @@ def write_code_to_file(file_path: str, code: str) -> str:
         return f"FILE_SAVED: {file_path} (container: codesentinel-proj-{_current_project})"
     return f"FILE_SAVE_FAILED: {file_path}"
 
+@tool
+def view_file(file_path: str) -> str:
+    """
+    View a file's content with line numbers, to help construct an exact
+    old_str for edit_code_in_file. Prefer this over running 'cat' or
+    'sed' via execute_project_command when you need to read a file
+    before editing it.
+    """
+    content = sandbox.read_file(_current_project, file_path)
+    if content is None:
+        return f"VIEW_FAILED: {file_path} does not exist."
+    lines = content.splitlines()
+    numbered = "\n".join(f"{i+1:4}| {line}" for i, line in enumerate(lines))
+    return numbered
 
 
 @tool("execute_project_command", args_schema=ExecuteCommandInput)
@@ -126,26 +170,38 @@ def list_project_files() -> str:
         return "No files in this project's container yet."
     return "Files:\n" + "\n".join(f"- {f}" for f in files)
 
-@tool
+@tool("edit_code_in_file", args_schema=EditFileInput)
 def edit_code_in_file(file_path: str, old_str: str, new_str: str) -> str:
     """
-    Make a targeted edit to an existing file: replaces old_str with
-    new_str. old_str must match the file's current content EXACTLY
-    (including whitespace) and appear exactly once - this prevents
-    accidentally editing the wrong location. Include enough surrounding
-    context in old_str to make it unique if needed.
-
-    Prefer this over write_code_to_file when fixing a specific bug in an
-    existing file - rewriting the whole file risks changing unrelated
-    code that was already working.
+    Make a targeted, SMALL edit to an existing file. Prefer this over
+    write_code_to_file when fixing a specific bug - rewriting the whole
+    file risks changing unrelated code. If the fix requires changing more
+    than a few lines, use write_code_to_file for a full rewrite instead
+    of trying to force it through this tool.
     """
+    tracker = _tracker()
+    attempt = tracker.record_attempt()
+    if attempt["global_limit_reached"]:
+        return (
+            f"GLOBAL_ATTEMPT_LIMIT_REACHED: {attempt['total_attempts']} attempts "
+            f"made without success (limit: {tracker.max_total_attempts}). "
+            f"STOP and report this to the user."
+        )
+
     current = sandbox.read_file(_current_project, file_path)
     if current is None:
         return f"EDIT_FAILED: {file_path} does not exist yet. Use write_code_to_file to create it."
 
     count = current.count(old_str)
+    count = current.count(old_str)
     if count == 0:
-        return f"EDIT_FAILED: old_str not found in {file_path}. Re-check exact text - whitespace and indentation matter."
+        near_misses = _find_near_misses(current, old_str)
+        return (
+            f"EDIT_FAILED: old_str not found in {file_path}. "
+            f"Re-check exact text - whitespace and indentation matter. "
+            f"Use view_file to see exact current content with line numbers."
+            f"{near_misses}"
+        )
     if count > 1:
         return f"EDIT_FAILED: old_str appears {count} times in {file_path}. Include more surrounding context to make it uniquely identify one location."
 
@@ -160,6 +216,7 @@ def edit_code_in_file(file_path: str, old_str: str, new_str: str) -> str:
 
     ok = sandbox.write_file(_current_project, _current_language, file_path, updated)
     if ok:
+        tracker.clear_errors()
         logger.info(f"edit_code_in_file: {file_path}")
         return f"FILE_EDITED: {file_path}"
     return f"FILE_EDIT_FAILED: {file_path}"

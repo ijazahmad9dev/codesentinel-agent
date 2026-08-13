@@ -1,10 +1,6 @@
-from pydantic_settings import BaseSettings
+import os
 
-
-class Settings(BaseSettings):
-    database_url: str = "sqlite:///./blog.db"
-    app_name: str = "Blog API"
-    debug: bool = False
-
-
-settings = Settings()
+class Config:
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///library.db'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key'

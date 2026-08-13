@@ -8,6 +8,8 @@ from src.agent.graph.reviewer.review_store import write_review_results
 from src.agent import tools as agent_tools
 from src.executor.sandbox import CodeSandbox
 from src.utils.model_info import collect_models_used
+from src.utils.error_tracker import ErrorTracker
+from src.executor.sandbox import CodeSandbox
 
 sandbox = CodeSandbox()
 
@@ -24,8 +26,6 @@ def parse_review_status(text: str) -> str:
 
 
 def reviewer_node(state: GraphState) -> dict:
-    from src.utils.error_tracker import ErrorTracker
-    from src.executor.sandbox import CodeSandbox
 
     tracker = ErrorTracker(state["project"], state["language"], CodeSandbox())
     if tracker.is_exhausted():

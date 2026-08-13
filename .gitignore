@@ -5,9 +5,11 @@ __pycache__/*
 inspect
 inspect/*
 data
-data/*
 .git
+data/*
+
 
 project/
-project/*
 download_project.py
+project/*
+
